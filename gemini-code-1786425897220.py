@@ -10,7 +10,7 @@ import re
 st.set_page_config(page_title="Calcolatore Alba/Tramonto Rotta Navale", layout="wide")
 
 st.title("🚢 Calcolatore Alba & Tramonto per Rotte Navali")
-st.write("Carica il file della rotta per visualizzare le effemeridi (UTC e Locale) e la mappa interattiva.")
+st.write("Carica il file della rotta per visualizzare le effemeridi in Ora Locale (Local Time) e la mappa interattiva.")
 
 # Sidebar per caricamento file
 st.sidebar.header("Carica Dati Rotta")
@@ -42,7 +42,7 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
-# Funzione per la lettura del file CSV e selezione delle sole colonne richieste
+# Funzione per la lettura del file CSV e selezione delle colonne richieste
 def load_and_process_csv(file):
     encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
     df = None
@@ -60,7 +60,7 @@ def load_and_process_csv(file):
     # Pulisce i nomi delle colonne rimuovendo caratteri speciali come BOM (ï»¿)
     df.columns = df.columns.str.replace('ï»¿', '').str.strip()
 
-    # Mappatura flessibile per individuare esattamente le 6 colonne richieste
+    # Mappatura flessibile per individuare le 6 colonne richieste
     target_columns = {
         'Waypoint': next((c for c in df.columns if 'waypoint' in c.lower()), None),
         'Name': next((c for c in df.columns if c.lower() == 'name'), None),
@@ -70,12 +70,12 @@ def load_and_process_csv(file):
         'Arrival Time (Local)': next((c for c in df.columns if 'arrival time (local)' in c.lower()), None),
     }
 
-    # Verifico che le colonne fondamentali (Lat, Lon, UTC) esistano
+    # Verifico presenza colonne minime
     missing = [k for k, v in target_columns.items() if v is None and k in ['Latitude', 'Longitude', 'Arrival Time (UTC)']]
     if missing:
         raise KeyError(f"Mancano le seguenti colonne obbligatorie nel CSV: {', '.join(missing)}")
 
-    # Filtro mantenendo solo le colonne rilevate
+    # Filtro mantenendo solo le colonne trovate
     selected_cols = {v: k for k, v in target_columns.items() if v is not None}
     df = df[list(selected_cols.keys())].rename(columns=selected_cols)
 
@@ -98,61 +98,74 @@ else:
         if 'Arrival Time (Local)' in df.columns:
             df['Arrival Time (Local)'] = pd.to_datetime(df['Arrival Time (Local)'], errors='coerce')
 
-        # Calcolo Alba, Tramonto e Condizione Luce (UTC)
-        sunrises, sunsets, condizioni = [], [], []
+        # Calcolo Alba e Tramonto in Local Time
+        sunrises_local, sunsets_local, condizioni = [], [], []
 
         for idx, row in df.iterrows():
             lat = row['Lat_Decimal']
             lon = row['Lon_Decimal']
-            dt = row['Arrival Time (UTC)']
+            dt_utc = row['Arrival Time (UTC)']
+            dt_local = row.get('Arrival Time (Local)')
             
-            if pd.isna(lat) or pd.isna(lon) or pd.isna(dt):
-                sunrises.append("N/D")
-                sunsets.append("N/D")
+            if pd.isna(lat) or pd.isna(lon) or pd.isna(dt_utc):
+                sunrises_local.append("N/D")
+                sunsets_local.append("N/D")
                 condizioni.append("Dati Incompleti")
                 continue
 
             try:
+                # Calcolo effemeridi base UTC
                 city = LocationInfo("Point", "Region", "UTC", lat, lon)
-                s = sun(city.observer, date=dt.date())
+                s = sun(city.observer, date=dt_utc.date())
                 
-                sr_time = s['sunrise'].strftime('%H:%M')
-                ss_time = s['sunset'].strftime('%H:%M')
+                sr_utc = s['sunrise']
+                ss_utc = s['sunset']
                 
-                sunrises.append(sr_time)
-                sunsets.append(ss_time)
+                # Calcolo offset locale se disponibile Arrival Time (Local)
+                if pd.notna(dt_local):
+                    offset = dt_local - dt_utc
+                    sr_local = sr_utc + offset
+                    ss_local = ss_utc + offset
+                    ref_dt = dt_local
+                else:
+                    sr_local = sr_utc
+                    ss_local = ss_utc
+                    ref_dt = dt_utc
+
+                sunrises_local.append(sr_local.strftime('%H:%M'))
+                sunsets_local.append(ss_local.strftime('%H:%M'))
                 
-                if s['sunrise'].time() <= dt.time() <= s['sunset'].time():
+                # Determino condizione giorno/notte rispetto all'orario locale
+                if sr_local.time() <= ref_dt.time() <= ss_local.time():
                     condizioni.append("☀️ Giorno")
                 else:
                     condizioni.append("🌙 Notte")
             except Exception:
-                sunrises.append("N/D")
-                sunsets.append("N/D")
+                sunrises_local.append("N/D")
+                sunsets_local.append("N/D")
                 condizioni.append("Errore Calcolo")
 
-        df['Alba (UTC)'] = sunrises
-        df['Tramonto (UTC)'] = sunsets
+        df['Alba (Local)'] = sunrises_local
+        df['Tramonto (Local)'] = sunsets_local
         df['Luce'] = condizioni
 
-        # Organizzazione colonne per la visualizzazione finale
+        # Organizzazione colonne per la tabella finale
         output_cols = []
-        for col in ['Waypoint', 'Name', 'Latitude', 'Longitude', 'Arrival Time (UTC)', 'Arrival Time (Local)', 'Alba (UTC)', 'Tramonto (UTC)', 'Luce']:
+        for col in ['Waypoint', 'Name', 'Latitude', 'Longitude', 'Arrival Time (Local)', 'Arrival Time (UTC)', 'Alba (Local)', 'Tramonto (Local)', 'Luce']:
             if col in df.columns:
                 output_cols.append(col)
 
         col1, col2 = st.columns([1.2, 0.8])
 
         with col1:
-            st.subheader("📍 Tabella Effemeridi Rotta")
+            st.subheader("📍 Tabella Effemeridi Rotta (Ora Locale)")
             st.dataframe(df[output_cols], use_container_width=True)
             
-            # Download del CSV elaborato
             csv_data = df[output_cols].to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Scarica Tabella Elaborata (CSV)",
                 data=csv_data,
-                file_name='rotta_effemeridi.csv',
+                file_name='rotta_effemeridi_local.csv',
                 mime='text/csv',
             )
 
@@ -169,11 +182,13 @@ else:
                 
                 for idx, row in valid_points.iterrows():
                     wp_name = row.get('Name') if pd.notna(row.get('Name')) else f"WP {row.get('Waypoint', idx+1)}"
+                    local_time_str = row['Arrival Time (Local)'] if 'Arrival Time (Local)' in row and pd.notna(row['Arrival Time (Local)']) else row['Arrival Time (UTC)']
+                    
                     popup_text = f"""
                     <b>{wp_name}</b><br>
-                    UTC: {row['Arrival Time (UTC)']}<br>
-                    Alba (UTC): {row['Alba (UTC)']}<br>
-                    Tramonto (UTC): {row['Tramonto (UTC)']}<br>
+                    Ora locale: {local_time_str}<br>
+                    Alba (Local): {row['Alba (Local)']}<br>
+                    Tramonto (Local): {row['Tramonto (Local)']}<br>
                     Stato: {row['Luce']}
                     """
                     color = 'orange' if 'Giorno' in str(row['Luce']) else 'darkblue'
