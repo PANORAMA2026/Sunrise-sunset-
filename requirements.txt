@@ -4,3 +4,4 @@ astral
 folium
 streamlit-folium
 openpyxl
+xlrd
