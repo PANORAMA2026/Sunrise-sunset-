@@ -29,9 +29,13 @@ if uploaded_file is None:
     df = get_sample_data()
 else:
     if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+    try:
+        df = pd.read_csv(uploaded_file, encoding='utf-8')
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, encoding='latin1')
+else:
+    df = pd.read_excel(uploaded_file)
 
 # Conversione date
 df['Data_Ora'] = pd.to_datetime(df['Data_Ora'])
