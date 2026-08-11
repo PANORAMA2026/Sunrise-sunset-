@@ -46,7 +46,6 @@ def parse_coordinate(val):
         return float(val)
     
     val_str = str(val).strip().upper()
-    # Riconosce formati tipo "44° 24.3' N" oppure "44 24.3 N"
     match = re.match(r'([+-]?\d+[\.,]?\d*)\s*°?\s*(\d*[\.,]?\d*)?\s*\'?\s*([NSEW])?', val_str)
     if match:
         deg = float(match.group(1).replace(',', '.'))
@@ -65,64 +64,36 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
-# Funzione per normalizzare le colonne del dataframe
-def normalize_dataframe(df):
-    cols = {str(c).strip().lower(): c for c in df.columns}
+# Tentativo di individuazione automatica delle colonne
+def auto_detect_columns(df):
+    cols = list(df.columns)
     mapping = {}
-    
-    # Ricerca Latitudine
-    for alias in ['lat', 'latitude', 'latitudine', 'lat (deg)']:
-        if alias in cols:
-            mapping[cols[alias]] = 'Latitudine'
-            break
-            
-    # Ricerca Longitudine
-    for alias in ['lon', 'long', 'longitude', 'longitudine', 'lon (deg)']:
-        if alias in cols:
-            mapping[cols[alias]] = 'Longitudine'
-            break
 
-    # Ricerca Waypoint
-    for alias in ['waypoint', 'wp', 'name', 'nome', 'point', 'punto', 'station']:
-        if alias in cols:
-            mapping[cols[alias]] = 'Waypoint'
-            break
+    for c in cols:
+        c_clean = str(c).strip().lower()
+        if any(alias in c_clean for alias in ['lat', 'latitude', 'latitudine']) and 'Latitudine' not in mapping.values():
+            mapping[c] = 'Latitudine'
+        elif any(alias in c_clean for alias in ['lon', 'long', 'longitude', 'longitudine']) and 'Longitudine' not in mapping.values():
+            mapping[c] = 'Longitudine'
+        elif any(alias in c_clean for alias in ['waypoint', 'wp', 'name', 'nome', 'point', 'punto', 'station', 'wpt']) and 'Waypoint' not in mapping.values():
+            mapping[c] = 'Waypoint'
+        elif any(alias in c_clean for alias in ['data_ora', 'datetime', 'date_time', 'date/time', 'eta', 'etd', 'utc', 'time', 'date', 'timestamp']) and 'Data_Ora' not in mapping.values():
+            mapping[c] = 'Data_Ora'
 
-    # Ricerca Data/Ora
-    for alias in ['data_ora', 'datetime', 'date_time', 'eta', 'time', 'date', 'data', 'ora']:
-        if alias in cols:
-            mapping[cols[alias]] = 'Data_Ora'
-            break
+    return mapping
 
-    df = df.rename(columns=mapping)
-
-    # Se Date e Time sono separate, prova a unirle
-    if 'Data_Ora' not in df.columns:
-        date_col = next((c for c in df.columns if c.lower() in ['date', 'data']), None)
-        time_col = next((c for c in df.columns if c.lower() in ['time', 'ora']), None)
-        if date_col and time_col:
-            df['Data_Ora'] = df[date_col].astype(str) + ' ' + df[time_col].astype(str)
-
-    if 'Waypoint' not in df.columns:
-        df['Waypoint'] = [f"WP {i+1}" for i in range(len(df))]
-
-    return df
-
-# Caricamento ed elaborazione dati con fallback robusto
+# Caricamento ed elaborazione dati
 if uploaded_file is None:
     st.info("👋 Nessun file caricato. Sto mostrando una rotta di esempio.")
     df = get_sample_data()
 else:
     df = None
-    
-    # 1. Tenta la lettura come CSV
     try:
         uploaded_file.seek(0)
         df = load_csv_safely(uploaded_file)
     except Exception:
         pass
 
-    # 2. Tenta la lettura come file Excel
     if df is None:
         try:
             uploaded_file.seek(0)
@@ -134,23 +105,61 @@ else:
             except Exception:
                 pass
 
-    # 3. Esito del caricamento
     if df is not None:
-        df = normalize_dataframe(df)
         st.success(f"File '{uploaded_file.name}' caricato con successo!")
     else:
         st.error("Errore nella lettura del file: impossibile determinare il formato o file danneggiato.")
         st.stop()
 
-# Conversione coordinate e date
-if 'Latitudine' in df.columns and 'Longitudine' in df.columns:
-    df['Latitudine'] = df['Latitudine'].apply(parse_coordinate)
-    df['Longitudine'] = df['Longitudine'].apply(parse_coordinate)
+# Mappatura e Selezione Colonne
+st.sidebar.subheader("⚙️ Mappatura Colonne")
 
-if 'Data_Ora' in df.columns:
-    df['Data_Ora'] = pd.to_datetime(df['Data_Ora'], errors='coerce')
+all_columns = list(df.columns)
+detected = auto_detect_columns(df)
+
+# Latitudine
+default_lat_idx = all_columns.index(next((k for k, v in detected.items() if v == 'Latitudine'), all_columns[0]))
+col_lat = st.sidebar.selectbox("Colonna Latitudine:", all_columns, index=default_lat_idx)
+
+# Longitudine
+default_lon_idx = all_columns.index(next((k for k, v in detected.items() if v == 'Longitudine'), all_columns[min(1, len(all_columns)-1)]))
+col_lon = st.sidebar.selectbox("Colonna Longitudine:", all_columns, index=default_lon_idx)
+
+# Waypoint
+default_wp_idx = all_columns.index(next((k for k, v in detected.items() if v == 'Waypoint'), all_columns[0])) if any(v == 'Waypoint' for v in detected.values()) else None
+col_wp = st.sidebar.selectbox("Colonna Nome Waypoint (Opzionale):", ["Genera automatico (WP 1, WP 2...)"] + all_columns, index=0 if default_wp_idx is None else default_wp_idx + 1)
+
+# Data / Ora
+dt_options = ["Nessuna nel file (Usa data/ora manuale)"] + all_columns
+default_dt_idx = (all_columns.index(next(k for k, v in detected.items() if v == 'Data_Ora')) + 1) if any(v == 'Data_Ora' for v in detected.values()) else 0
+col_dt = st.sidebar.selectbox("Colonna Data e Ora:", dt_options, index=default_dt_idx)
+
+# Assegnazione colonne nel DataFrame
+df['Latitudine'] = df[col_lat].apply(parse_coordinate)
+df['Longitudine'] = df[col_lon].apply(parse_coordinate)
+
+if col_wp != "Genera automatico (WP 1, WP 2...)":
+    df['Waypoint'] = df[col_wp]
 else:
-    st.error("❌ Impossibile identificare le colonne contenenti data e ora.")
+    df['Waypoint'] = [f"WP {i+1}" for i in range(len(df))]
+
+# Gestione Data / Ora manuale o da colonna
+if col_dt != "Nessuna nel file (Usa data/ora manuale)":
+    df['Data_Ora'] = pd.to_datetime(df[col_dt], errors='coerce')
+else:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("📅 Imposta Data/Ora Manuale")
+    start_date = st.sidebar.date_input("Data di partenza rotta:", datetime.date.today())
+    start_time = st.sidebar.time_input("Ora di partenza (UTC):", datetime.time(8, 0))
+    start_dt = datetime.datetime.combine(start_date, start_time)
+    
+    # Assegna orari progressivi (es. 1 ora di differenza tra waypoint per default)
+    hours_step = st.sidebar.number_input("Ore stimati tra ciascun waypoint:", min_value=0.1, value=1.0, step=0.5)
+    df['Data_Ora'] = [start_dt + datetime.timedelta(hours=i*hours_step) for i in range(len(df))]
+
+# Verifica presenza date valide
+if df['Data_Ora'].isna().all():
+    st.error("❌ La colonna selezionata per Data/Ora non contiene valori validi. Seleziona un'altra colonna dal menu a sinistra oppure usa la data/ora manuale.")
     st.stop()
 
 # Calcolo Alba e Tramonto con Astral
@@ -192,9 +201,12 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📍 Tabella Dati ed Effemeridi")
-    st.dataframe(df, use_container_width=True)
     
-    csv_data = df.to_csv(index=False).encode('utf-8')
+    # Selezione colonne pulite da mostrare
+    display_cols = ['Waypoint', 'Latitudine', 'Longitudine', 'Data_Ora', 'Alba (UTC)', 'Tramonto (UTC)', 'Luce']
+    st.dataframe(df[display_cols], use_container_width=True)
+    
+    csv_data = df[display_cols].to_csv(index=False).encode('utf-8')
     st.download_button(
         label="📥 Scarica Tabella Elaborata (CSV)",
         data=csv_data,
