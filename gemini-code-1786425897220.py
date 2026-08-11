@@ -15,8 +15,9 @@ st.write("Carica il file della rotta per visualizzare la mappa interattiva e le 
 
 # Sidebar per caricamento file
 st.sidebar.header("Carica Dati Rotta")
-uploaded_file = st.sidebar.file_uploader("Carica un file Excel (.xlsx) o CSV (.csv)", type=["xlsx", "csv"])
+uploaded_file = st.sidebar.file_uploader("Carica un file Excel (.xlsx, .xls) o CSV (.csv)", type=["xlsx", "xls", "csv"])
 
+# Dati di esempio predefiniti
 def get_sample_data():
     return pd.DataFrame({
         'Waypoint': ['Genova', 'Stretto Bonifacio', 'Palermo'],
@@ -25,6 +26,7 @@ def get_sample_data():
         'Data_Ora': ['2026-05-10 08:00', '2026-05-10 22:30', '2026-05-11 14:00']
     })
 
+# Funzione per leggere CSV gestendo vari encoding e separatori
 def load_csv_safely(file):
     encodings_to_try = ['utf-8', 'latin1', 'cp1252', 'iso-8859-1']
     for enc in encodings_to_try:
@@ -36,15 +38,15 @@ def load_csv_safely(file):
     file.seek(0)
     return pd.read_csv(file, encoding='latin1')
 
+# Funzione per convertire coordinate nautiche o stringhe decimali
 def parse_coordinate(val):
-    """ Converte coordinate GPS/Nautiche (es. 44° 24.3' N) in float decimale """
     if pd.isna(val):
         return None
     if isinstance(val, (int, float)):
         return float(val)
     
     val_str = str(val).strip().upper()
-    # Esempio: 44 24.3 N o 44°24.3'N
+    # Riconosce formati tipo "44° 24.3' N" oppure "44 24.3 N"
     match = re.match(r'([+-]?\d+[\.,]?\d*)\s*°?\s*(\d*[\.,]?\d*)?\s*\'?\s*([NSEW])?', val_str)
     if match:
         deg = float(match.group(1).replace(',', '.'))
@@ -63,31 +65,30 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
+# Funzione per normalizzare le colonne del dataframe
 def normalize_dataframe(df):
-    """ Rinomina automaticamente le colonne trovando i sinonimi più comuni """
     cols = {str(c).strip().lower(): c for c in df.columns}
-    
     mapping = {}
     
-    # Ricerca colonna Latitudine
+    # Ricerca Latitudine
     for alias in ['lat', 'latitude', 'latitudine', 'lat (deg)']:
         if alias in cols:
             mapping[cols[alias]] = 'Latitudine'
             break
             
-    # Ricerca colonna Longitudine
+    # Ricerca Longitudine
     for alias in ['lon', 'long', 'longitude', 'longitudine', 'lon (deg)']:
         if alias in cols:
             mapping[cols[alias]] = 'Longitudine'
             break
 
-    # Ricerca colonna Waypoint / Nome Punto
+    # Ricerca Waypoint
     for alias in ['waypoint', 'wp', 'name', 'nome', 'point', 'punto', 'station']:
         if alias in cols:
             mapping[cols[alias]] = 'Waypoint'
             break
 
-    # Ricerca colonna Data/Ora
+    # Ricerca Data/Ora
     for alias in ['data_ora', 'datetime', 'date_time', 'eta', 'time', 'date', 'data', 'ora']:
         if alias in cols:
             mapping[cols[alias]] = 'Data_Ora'
@@ -95,7 +96,7 @@ def normalize_dataframe(df):
 
     df = df.rename(columns=mapping)
 
-    # Se 'Date' e 'Time' sono su colonne separate, prova a unirle
+    # Se Date e Time sono separate, prova a unirle
     if 'Data_Ora' not in df.columns:
         date_col = next((c for c in df.columns if c.lower() in ['date', 'data']), None)
         time_col = next((c for c in df.columns if c.lower() in ['time', 'ora']), None)
@@ -107,21 +108,38 @@ def normalize_dataframe(df):
 
     return df
 
-# Caricamento ed elaborazione dati
+# Caricamento ed elaborazione dati con fallback robusto
 if uploaded_file is None:
     st.info("👋 Nessun file caricato. Sto mostrando una rotta di esempio.")
     df = get_sample_data()
 else:
+    df = None
+    
+    # 1. Tenta la lettura come CSV
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = load_csv_safely(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-        
+        uploaded_file.seek(0)
+        df = load_csv_safely(uploaded_file)
+    except Exception:
+        pass
+
+    # 2. Tenta la lettura come file Excel
+    if df is None:
+        try:
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+        except Exception:
+            try:
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file, engine='xlrd')
+            except Exception:
+                pass
+
+    # 3. Esito del caricamento
+    if df is not None:
         df = normalize_dataframe(df)
         st.success(f"File '{uploaded_file.name}' caricato con successo!")
-    except Exception as e:
-        st.error(f"Errore nella lettura del file: {e}")
+    else:
+        st.error("Errore nella lettura del file: impossibile determinare il formato o file danneggiato.")
         st.stop()
 
 # Conversione coordinate e date
@@ -132,7 +150,7 @@ if 'Latitudine' in df.columns and 'Longitudine' in df.columns:
 if 'Data_Ora' in df.columns:
     df['Data_Ora'] = pd.to_datetime(df['Data_Ora'], errors='coerce')
 else:
-    st.error("❌ Impossibile identificare le colonne con la data e l'ora di passaggio nei Waypoint.")
+    st.error("❌ Impossibile identificare le colonne contenenti data e ora.")
     st.stop()
 
 # Calcolo Alba e Tramonto con Astral
