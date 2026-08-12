@@ -3,6 +3,8 @@ import pandas as pd
 import datetime
 import re
 import io
+import urllib.request
+import json
 import folium
 from streamlit_folium import st_folium
 from astral import LocationInfo
@@ -14,10 +16,10 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 st.set_page_config(page_title="Gestore Rotte & Effemeridi", layout="wide")
 
 st.title("🚢 Calcolatore Effemeridi e Gestore Rotte Navali")
-st.write("Visualizza le effemeridi per le date originali del CSV oppure inserisci nuove date di partenza per ricalcolare la rotta per l'intera sua durata.")
+st.write("Visualizza le effemeridi per la rotta con identificazione automatica dei porti e giorni di navigazione (Seaday).")
 
 # ----------------------------------------------------
-# FUNZIONI UTILI & PARSING
+# FUNZIONI UTILI, REVERSE GEOCODING & PARSING
 # ----------------------------------------------------
 
 def parse_coordinate(val):
@@ -43,20 +45,34 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
+def get_port_name_from_coords(lat, lon):
+    """Effettua il Reverse Geocoding usando OpenStreetMap Nominatim per trovare il nome del porto/città."""
+    if lat is None or lon is None:
+        return "N/D"
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+        req = urllib.request.Request(url, headers={'User-Agent': 'NavalRoutePlanner/1.0'})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode())
+            address = data.get('address', {})
+            # Cerca nell'ordine: nome del porto, città, comune o paese
+            port = address.get('port') or address.get('city') or address.get('town') or address.get('village') or address.get('county')
+            return port.upper() if port else "PORTO"
+    except Exception:
+        return "PORTO"
+
 def parse_user_date(d_str):
     """Accetta sia AAAA-MM-GG che GG/MM/AAAA."""
     d_str = d_str.strip()
     if not d_str:
         return None
     
-    # Formato AAAA-MM-GG
     if '-' in d_str:
         try:
             return pd.to_datetime(d_str, format='%Y-%m-%d').date()
         except Exception:
             pass
             
-    # Formato GG/MM/AAAA
     if '/' in d_str:
         try:
             return pd.to_datetime(d_str, dayfirst=True).date()
@@ -107,7 +123,7 @@ def get_sun_time_local(wp_row, target_event='sunrise'):
         return "N/D"
 
 def generate_excel_output(df_report):
-    """Genera file Excel formattato identico al modello Book1.xlsx."""
+    """Genera file Excel formattato."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "EFFEMERIDI"
@@ -160,7 +176,7 @@ def generate_excel_output(df_report):
     return output
 
 # ----------------------------------------------------
-# SIDEBAR: CARICAMENTO FILE & GESTIONE DATE
+# SIDEBAR: CONFIGURAZIONE
 # ----------------------------------------------------
 
 st.sidebar.header("📁 1. Carica File Rotte")
@@ -169,11 +185,45 @@ uploaded_files = st.sidebar.file_uploader("Carica uno o più file CSV (.csv)", t
 route_configs = {}
 
 if uploaded_files:
-    st.sidebar.header("📅 2. Date di Partenza")
-    st.sidebar.write("Lascia vuoto per usare la **data originale del CSV**, oppure inserisci nuove date di partenza separate da virgola (es. `2026-08-01, 2026-08-15`):")
+    st.sidebar.header("📅 2. Impostazioni Rotta e Porti")
 
     for file in uploaded_files:
-        st.sidebar.markdown(f"**Rotta:** `{file.name}`")
+        st.sidebar.markdown(f"---")
+        st.sidebar.markdown(f"**File:** `{file.name}`")
+        
+        # Lettura preliminare per individuare i punti estremi della rotta
+        encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
+        df_preview = None
+        for enc in encodings:
+            try:
+                file.seek(0)
+                df_preview = pd.read_csv(file, encoding=enc, sep=None, engine='python')
+                break
+            except Exception:
+                continue
+
+        auto_dep = "PORTO DI PARTENZA"
+        auto_arr = "PORTO DI ARRIVO"
+
+        if df_preview is not None:
+            df_preview.columns = df_preview.columns.str.replace('ï»¿', '').str.strip()
+            col_lat = next((c for c in df_preview.columns if 'latitude' in c.lower()), None)
+            col_lon = next((c for c in df_preview.columns if 'longitude' in c.lower()), None)
+            
+            if col_lat and col_lon:
+                first_lat = parse_coordinate(df_preview.iloc[0][col_lat])
+                first_lon = parse_coordinate(df_preview.iloc[0][col_lon])
+                last_lat = parse_coordinate(df_preview.iloc[-1][col_lat])
+                last_lon = parse_coordinate(df_preview.iloc[-1][col_lon])
+
+                # Calcolo automatico tramite Reverse Geocoding
+                auto_dep = get_port_name_from_coords(first_lat, first_lon)
+                auto_arr = get_port_name_from_coords(last_lat, last_lon)
+
+        # Input utente con valore precompilato dall'algoritmo
+        dep_port = st.sidebar.text_input("Porto di Partenza:", value=auto_dep, key=f"dep_{file.name}")
+        arr_port = st.sidebar.text_input("Porto di Arrivo:", value=auto_arr, key=f"arr_{file.name}")
+        
         dates_str = st.sidebar.text_input(
             "Nuova Data di Partenza (AAAA-MM-GG o GG/MM/AAAA):",
             value="",
@@ -192,11 +242,13 @@ if uploaded_files:
         
         route_configs[file.name] = {
             'file': file,
-            'start_dates': parsed_dates  # Se vuoto, usera la data originale del CSV
+            'start_dates': parsed_dates,
+            'dep_port': dep_port,
+            'arr_port': arr_port
         }
 
 # ----------------------------------------------------
-# PROCESSING & VISUALIZZAZIONE
+# PROCESSING & TABELLA DI OUTPUT
 # ----------------------------------------------------
 
 if not uploaded_files:
@@ -208,8 +260,9 @@ else:
     for file_name, config in route_configs.items():
         file = config['file']
         user_start_dates = config['start_dates']
+        dep_port_name = config['dep_port']
+        arr_port_name = config['arr_port']
 
-        # Lettura file CSV
         encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
         df_base = None
         for enc in encodings:
@@ -230,8 +283,6 @@ else:
         col_local = next((c for c in df_base.columns if 'arrival time (local)' in c.lower()), None)
         col_lat = next((c for c in df_base.columns if 'latitude' in c.lower()), None)
         col_lon = next((c for c in df_base.columns if 'longitude' in c.lower()), None)
-        col_name = next((c for c in df_base.columns if c.lower() == 'name'), None)
-        col_wp = next((c for c in df_base.columns if 'waypoint' in c.lower()), None)
 
         if not (col_utc and col_lat and col_lon):
             st.error(f"Il file {file_name} non contiene tutte le colonne obbligatorie.")
@@ -240,18 +291,14 @@ else:
         df_base['Lat_Decimal'] = df_base[col_lat].apply(parse_coordinate)
         df_base['Lon_Decimal'] = df_base[col_lon].apply(parse_coordinate)
         
-        # FORZATURA dayfirst=True PER PARSARE CORRETTAMENTE GG/MM/AAAA DAL CSV
         df_base['Arrival Time (UTC)'] = pd.to_datetime(df_base[col_utc], dayfirst=True, errors='coerce')
         df_base['Arrival Time (Local)'] = pd.to_datetime(df_base[col_local], dayfirst=True, errors='coerce') if col_local else df_base['Arrival Time (UTC)']
 
-        # Data originale del CSV
         original_base_datetime = df_base['Arrival Time (Local)'].dropna().iloc[0]
         original_base_date = original_base_datetime.date()
 
-        # Se l'utente non specifica nuove date, usa la data originale del CSV
         target_start_dates = user_start_dates if user_start_dates else [original_base_date]
 
-        # Calcolo rotta per ogni data target
         for start_date in target_start_dates:
             days_shift = (start_date - original_base_date).days
             
@@ -267,28 +314,26 @@ else:
                 if day_df.empty:
                     continue
 
+                # LOGICA ASSEGNAZIONE NOME PORTO / SEADAY
                 if i == 0:
-                    port_of_call = day_df.iloc[0].get(col_name) if col_name and pd.notna(day_df.iloc[0].get(col_name)) else "Porto di Partenza"
+                    port_of_call = dep_port_name
                 elif i == len(unique_dates) - 1:
-                    port_of_call = day_df.iloc[-1].get(col_name) if col_name and pd.notna(day_df.iloc[-1].get(col_name)) else "Porto di Arrivo"
+                    port_of_call = arr_port_name
                 else:
-                    port_of_call = "Fun Day at Sea"
+                    port_of_call = "Seaday"
 
-                # WP più vicino alle 07:00 (Alba)
+                # Waypoint per Alba (07:00) e Tramonto (18:00)
                 target_7am = pd.Timestamp.combine(d, datetime.time(7, 0))
                 day_df['diff_7am'] = (day_df['Arrival Time (Local)'] - target_7am).abs()
                 wp_7am = day_df.loc[day_df['diff_7am'].idxmin()]
 
-                # WP più vicino alle 18:00 (Tramonto)
                 target_6pm = pd.Timestamp.combine(d, datetime.time(18, 0))
                 day_df['diff_6pm'] = (day_df['Arrival Time (Local)'] - target_6pm).abs()
                 wp_6pm = day_df.loc[day_df['diff_6pm'].idxmin()]
 
-                # Timezone
                 offset_sec = (wp_7am['Arrival Time (Local)'] - wp_7am['Arrival Time (UTC)']).total_seconds()
                 time_zone_str = format_timezone(offset_sec)
 
-                # Effemeridi
                 sunrise_str = get_sun_time_local(wp_7am, 'sunrise')
                 sunset_str = get_sun_time_local(wp_6pm, 'sunset')
 
