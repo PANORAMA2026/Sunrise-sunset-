@@ -12,12 +12,52 @@ st.set_page_config(
 st.title("⚓ Naval Ephemeris & Route Analyzer")
 st.write(
     "Calcolo di Alba, Tramonto e Time Zone per rotte singole o ripetute nel"
-    " calendario (Senza librerie esterne)."
+    " calendario."
 )
 
 # -----------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 # -----------------------------------------------------------------------------
+
+def parse_coordinate(coord):
+    """
+    Converte coordinate nautiche (es. "33° 45.007' N" o "118° 11.209' W")
+    o numeriche in gradi decimali trasformabili in float.
+    """
+    if pd.isna(coord):
+        return 0.0
+    if isinstance(coord, (int, float)):
+        return float(coord)
+    
+    s = str(coord).strip()
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    
+    # Formato Gradi° Minuti' Emisfero (es. 33° 45.007' N)
+    match = re.search(r"(\d+)°\s*(\d+(?:\.\d+)?)\s*['′]?\s*([NSEWnsew]?)", s)
+    if match:
+        degrees = float(match.group(1))
+        minutes = float(match.group(2))
+        direction = match.group(3).upper()
+        
+        decimal_degrees = degrees + (minutes / 60.0)
+        if direction in ['S', 'W']:
+            decimal_degrees = -decimal_degrees
+        return decimal_degrees
+        
+    # Formato con direzione finale senza gradi (es. 33.7501 N)
+    match_simple = re.search(r"([+-]?\d+(?:\.\d+)?)\s*([NSEWnsew]?)", s)
+    if match_simple:
+        val = float(match_simple.group(1))
+        direction = match_simple.group(2).upper()
+        if direction in ['S', 'W']:
+            val = -abs(val)
+        return val
+        
+    return 0.0
+
 
 def parse_tz_offset(tz_str):
     """Estrae l'offset orario numerico in ore da stringhe come '7 W', '8 W', '2 E'."""
@@ -51,17 +91,14 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
         # Declinazione solare (radianti)
         declination = 0.409 * math.sin((2 * math.pi / 365) * (day_of_year - 81))
 
-        # Converti latitudine in radianti
         lat_rad = math.radians(lat)
 
-        # Angolo orario dell'alba/tramonto
-        # -0.833° tiene conto del rifrazione atmosferica e del diametro solare
+        # Angolo orario dell'alba/tramonto (-0.833° tiene conto di rifrazione e diametro)
         cos_ha = (
             math.sin(math.radians(-0.833))
             - math.sin(lat_rad) * math.sin(declination)
         ) / (math.cos(lat_rad) * math.cos(declination))
 
-        # Controllo per sole di mezzanotte o notte polare
         if cos_ha >= 1:
             return "Mai sorge", "Mai sorge"
         if cos_ha <= -1:
@@ -73,14 +110,11 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
         b = (2 * math.pi / 365) * (day_of_year - 81)
         eot = 9.87 * math.sin(2 * b) - 7.53 * math.cos(b) - 1.5 * math.sin(b)
 
-        # Mezzogiorno solare (ore decimali UTC)
         solar_noon_utc = (720 - (4 * lon) - eot) / 60.0
 
-        # Ora UTC di alba e tramonto
         sunrise_utc_hours = solar_noon_utc - (ha / 15.0)
         sunset_utc_hours = solar_noon_utc + (ha / 15.0)
 
-        # Conversione in Ora Locale con Time Zone offset
         sunrise_local_hours = (sunrise_utc_hours + tz_offset_hours) % 24
         sunset_local_hours = (sunset_utc_hours + tz_offset_hours) % 24
 
@@ -108,10 +142,8 @@ route_files = st.sidebar.file_uploader(
 )
 
 if cal_file and route_files:
-    # Parsing Calendario Excel
     df_cal = pd.read_excel(cal_file)
 
-    # Identificazione colonne calendario
     cal_date_col = next(
         (c for c in df_cal.columns if 'date' in c.lower() or 'data' in c.lower()),
         df_cal.columns[0],
@@ -128,7 +160,6 @@ if cal_file and route_files:
     df_cal['Date_Parsed'] = pd.to_datetime(df_cal[cal_date_col]).dt.date
     df_cal['Location_Clean'] = df_cal[cal_port_col].astype(str).str.strip()
 
-    # Parsing Rotte CSV caricate
     routes_data = []
     for rf in route_files:
         try:
@@ -142,7 +173,6 @@ if cal_file and route_files:
             unique_dates = sorted(df_r['date_only'].dropna().unique())
             if unique_dates:
                 start_d = unique_dates[0]
-                # Giorni relativi (Giorno 0, 1, 2, 3...)
                 df_r['rel_day'] = df_r['date_only'].apply(
                     lambda d: (d - start_d).days if pd.notnull(d) else None
                 )
@@ -159,11 +189,10 @@ if cal_file and route_files:
         st.stop()
 
     # -----------------------------------------------------------------------------
-    # CONFIGURAZIONE ABBINAMENTO MULTIPLO (RICORRENZE ROTTA)
+    # CONFIGURAZIONE ABBINAMENTO MULTIPLO
     # -----------------------------------------------------------------------------
     st.subheader("🎯 Abbinamento Rotte a una o più Crociere/Ricorrenze")
 
-    # Elenco crociere o date di partenza disponibili
     cruise_options = (
         df_cal[cal_cruise_col].dropna().unique().tolist()
         if cal_cruise_col
@@ -179,7 +208,6 @@ if cal_file and route_files:
                 f"**Rotta `{r_info['filename']}`** ({r_info['num_days']} giorni)"
             )
         with col2:
-            # MULTISELECT: consente di scegliere TUTTE le crociere in cui questa rotta si ripete
             selected_cruises = st.multiselect(
                 f"Seleziona tutte le Crociere/Ricorrenze per `{r_info['filename']}`:",
                 options=cruise_options,
@@ -187,7 +215,6 @@ if cal_file and route_files:
                 key=f"multiselect_{idx}",
             )
 
-            # Registra le date di partenza per ciascuna ricorrenza selezionata
             for cruise_id in selected_cruises:
                 if cal_cruise_col:
                     start_date = df_cal[df_cal[cal_cruise_col] == cruise_id]['Date_Parsed'].min()
@@ -205,7 +232,7 @@ if cal_file and route_files:
     )
 
     # -----------------------------------------------------------------------------
-    # ELABORAZIONE EFFEMERIDI PER OGNI RICORRENZA
+    # ELABORAZIONE EFFEMERIDI
     # -----------------------------------------------------------------------------
     results = []
 
@@ -217,7 +244,6 @@ if cal_file and route_files:
         matching_waypoint = None
         matching_tz = '0'
 
-        # Controlla se questa riga appartiene a una delle ricorrenze
         for item in mapped_routes_list:
             r_df = item['df']
             r_start_date = item['start_cal_date']
@@ -238,10 +264,9 @@ if cal_file and route_files:
                         matching_tz = str(day_points.iloc[0]['Time Zone'])
                     break
 
-        # Calcolo Alba e Tramonto nativo se la rotta copre questa specifica data/ricorrenza
         if matching_waypoint is not None:
-            lat = float(matching_waypoint['Latitude'])
-            lon = float(matching_waypoint['Longitude'])
+            lat = parse_coordinate(matching_waypoint['Latitude'])
+            lon = parse_coordinate(matching_waypoint['Longitude'])
             tz_offset = parse_tz_offset(matching_tz)
             tz_str_formatted = format_tz_string(matching_tz)
 
