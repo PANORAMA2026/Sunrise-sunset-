@@ -11,8 +11,7 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Route Analyzer")
 st.write(
-    "Calcolo di Alba, Tramonto e Time Zone per rotte singole o ripetute nel"
-    " calendario."
+    "Calcolo di Alba, Tramonto e Time Zone basato esclusivamente sui file rotta caricate."
 )
 
 # -----------------------------------------------------------------------------
@@ -20,10 +19,7 @@ st.write(
 # -----------------------------------------------------------------------------
 
 def parse_coordinate(coord):
-    """
-    Converte coordinate nautiche (es. "33° 45.007' N" o "118° 11.209' W")
-    o numeriche in gradi decimali float.
-    """
+    """Converte coordinate nautiche (es. '33° 45.007' N') o decimali in float."""
     if pd.isna(coord):
         return 0.0
     if isinstance(coord, (int, float)):
@@ -35,7 +31,6 @@ def parse_coordinate(coord):
     except ValueError:
         pass
     
-    # Formato Gradi° Minuti' Emisfero (es. 33° 45.007' N)
     match = re.search(r"(\d+)°\s*(\d+(?:\.\d+)?)\s*['′]?\s*([NSEWnsew]?)", s)
     if match:
         degrees = float(match.group(1))
@@ -47,7 +42,6 @@ def parse_coordinate(coord):
             decimal_degrees = -decimal_degrees
         return decimal_degrees
         
-    # Formato con direzione finale (es. 33.7501 N)
     match_simple = re.search(r"([+-]?\d+(?:\.\d+)?)\s*([NSEWnsew]?)", s)
     if match_simple:
         val = float(match_simple.group(1))
@@ -60,17 +54,13 @@ def parse_coordinate(coord):
 
 
 def parse_tz_offset(tz_val):
-    """
-    Estrae l'offset orario numerico in ore da vari formati CSV:
-    "-07:00:00", "+02:00", "7 W", "2 E", "-7", "7"
-    """
+    """Estrae l'offset orario numerico in ore dal CSV (es. '-07:00:00', '7 W', '-7')."""
     if pd.isna(tz_val):
         return 0.0
     s = str(tz_val).strip()
     if not s or s.lower() == 'nan':
         return 0.0
 
-    # Formato HH:MM:SS o HH:MM (es. "-07:00:00", "+02:00")
     match_hhmmss = re.search(r'([+-]?)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?', s)
     if match_hhmmss:
         sign = -1.0 if match_hhmmss.group(1) == '-' else 1.0
@@ -78,14 +68,12 @@ def parse_tz_offset(tz_val):
         minutes = float(match_hhmmss.group(3))
         return sign * (hours + minutes / 60.0)
 
-    # Formato W / E (es. "7 W", "2 E")
     match_we = re.search(r'(\d+(?:\.\d+)?)\s*([WEwe])', s)
     if match_we:
         val = float(match_we.group(1))
         direction = match_we.group(2).upper()
         return -val if direction == 'W' else val
 
-    # Numero semplice (es. "-7", "2")
     try:
         return float(s)
     except ValueError:
@@ -93,7 +81,7 @@ def parse_tz_offset(tz_val):
 
 
 def format_tz_string(tz_val, offset_hours):
-    """Formatta la Time Zone in formato leggibile per la tabella (es. '7 W' o '2 E')."""
+    """Formatta la Time Zone per l'output (es. '7 W' o '2 E')."""
     s = str(tz_val).strip()
     if not s or s.lower() == 'nan':
         return "0"
@@ -112,15 +100,12 @@ def format_tz_string(tz_val, offset_hours):
 
 
 def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
-    """Calcola alba e tramonto in ora locale usando formule astronomiche NOAA."""
+    """Calcola alba e tramonto in ora locale (NOAA)."""
     try:
         day_of_year = date_obj.timetuple().tm_yday
-
-        # Declinazione solare (radianti)
         declination = 0.409 * math.sin((2 * math.pi / 365) * (day_of_year - 81))
         lat_rad = math.radians(lat)
 
-        # Angolo orario dell'alba/tramonto
         cos_ha = (
             math.sin(math.radians(-0.833))
             - math.sin(lat_rad) * math.sin(declination)
@@ -132,8 +117,6 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
             return "Mai tramonta", "Mai tramonta"
 
         ha = math.degrees(math.acos(cos_ha))
-
-        # Equazione del tempo (minuti)
         b = (2 * math.pi / 365) * (day_of_year - 81)
         eot = 9.87 * math.sin(2 * b) - 7.53 * math.cos(b) - 1.5 * math.sin(b)
 
@@ -207,6 +190,7 @@ if cal_file and route_files:
                     'filename': rf.name,
                     'df': df_r,
                     'num_days': len(unique_dates),
+                    'max_rel_day': max(df_r['rel_day'].dropna()),
                 })
         except Exception as e:
             st.sidebar.error(f"Errore nella lettura di {rf.name}: {e}")
@@ -216,14 +200,15 @@ if cal_file and route_files:
         st.stop()
 
     # -----------------------------------------------------------------------------
-    # CONFIGURAZIONE ABBINAMENTO MULTIPLO
+    # ABBINAMENTO ESPLICITO
     # -----------------------------------------------------------------------------
-    st.subheader("🎯 Abbinamento Rotte a una o più Crociere/Ricorrenze")
+    st.subheader("🎯 Abbinamento File Rotta a Crociere/Ricorrenze Specifiche")
+    st.info("Seleziona a quale Crociera/Data del calendario appartiene ciascun file CSV.")
 
     cruise_options = (
         df_cal[cal_cruise_col].dropna().unique().tolist()
         if cal_cruise_col
-        else df_cal['Date_Parsed'].unique().tolist()
+        else df_cal['Date_Parsed'].astype(str).unique().tolist()
     )
 
     mapped_routes_list = []
@@ -232,30 +217,35 @@ if cal_file and route_files:
         col1, col2 = st.columns([2, 3])
         with col1:
             st.write(
-                f"**Rotta `{r_info['filename']}`** ({r_info['num_days']} giorni)"
+                f"📄 **File Rotta:** `{r_info['filename']}` ({r_info['num_days']} giorni di navigazione)"
             )
         with col2:
             selected_cruises = st.multiselect(
-                f"Seleziona tutte le Crociere/Ricorrenze per `{r_info['filename']}`:",
+                f"Associa `{r_info['filename']}` a:",
                 options=cruise_options,
-                default=[cruise_options[0]] if idx == 0 else [],
+                default=[],  # Nessuna selezione automatica
                 key=f"multiselect_{idx}",
+                placeholder="Scegli la crociera dal calendario...",
             )
 
             for cruise_id in selected_cruises:
                 if cal_cruise_col:
                     start_date = df_cal[df_cal[cal_cruise_col] == cruise_id]['Date_Parsed'].min()
                 else:
-                    start_date = cruise_id
+                    start_date = pd.to_datetime(cruise_id).date()
 
                 mapped_routes_list.append({
+                    'filename': r_info['filename'],
                     'df': r_info['df'],
                     'cruise_id': cruise_id,
                     'start_cal_date': start_date,
+                    'max_rel_day': r_info['max_rel_day'],
                 })
 
+    # Filtro attivo di DEFAULT
     only_mapped = st.checkbox(
-        "Mostra solo i giorni con rotta caricata ed elaborata", value=False
+        "Limita la tabella solo alle crociere/rotte esplicitamente caricate ed abbinate",
+        value=True,
     )
 
     # -----------------------------------------------------------------------------
@@ -266,28 +256,31 @@ if cal_file and route_files:
     for _, cal_row in df_cal.iterrows():
         c_date = cal_row['Date_Parsed']
         port_name = cal_row['Location_Clean']
-        c_cruise = cal_row[cal_cruise_col] if cal_cruise_col else None
+        c_cruise = cal_row[cal_cruise_col] if cal_cruise_col else str(c_date)
 
         matching_waypoint = None
         matching_tz_val = '0'
+        matched_filename = None
 
         for item in mapped_routes_list:
             r_df = item['df']
             r_start_date = item['start_cal_date']
             r_cruise_id = item['cruise_id']
+            max_rel_day = item['max_rel_day']
 
-            if cal_cruise_col and c_cruise != r_cruise_id:
+            if c_cruise != r_cruise_id:
                 continue
 
             rel_day = (c_date - r_start_date).days
 
-            if rel_day >= 0:
+            # Verifica che il giorno rientri esattamente nella durata della rotta caricata
+            if 0 <= rel_day <= max_rel_day:
                 day_points = r_df[r_df['rel_day'] == rel_day]
                 if not day_points.empty:
                     mid_idx = len(day_points) // 2
                     matching_waypoint = day_points.iloc[mid_idx]
+                    matched_filename = item['filename']
 
-                    # Ricerca dinamica della colonna Time Zone o UTC Offset
                     tz_col = next(
                         (
                             c
@@ -312,27 +305,34 @@ if cal_file and route_files:
         if matching_waypoint is not None:
             lat = parse_coordinate(matching_waypoint['Latitude'])
             lon = parse_coordinate(matching_waypoint['Longitude'])
-            
+
             tz_offset = parse_tz_offset(matching_tz_val)
             tz_str_formatted = format_tz_string(matching_tz_val, tz_offset)
 
             sunrise, sunset = calculate_sun_events_native(lat, lon, c_date, tz_offset)
-            status = "OK"
-        else:
-            if only_mapped:
-                continue
-            sunrise, sunset = "N/D", "N/D"
-            tz_str_formatted = "N/D"
-            status = "N/D (Rotta non caricata)"
 
-        results.append({
-            "DATE": c_date.strftime("%Y-%m-%d"),
-            "PORT OF CALL": port_name,
-            "TIME ZONE": tz_str_formatted,
-            "SUNRISE": sunrise,
-            "SUNSET": sunset,
-            "STATUS": status,
-        })
+            results.append({
+                "CRUISE CODE": c_cruise,
+                "DATE": c_date.strftime("%Y-%m-%d"),
+                "PORT OF CALL": port_name,
+                "TIME ZONE": tz_str_formatted,
+                "SUNRISE": sunrise,
+                "SUNSET": sunset,
+                "FILE ROTTA": matched_filename,
+                "STATUS": "OK",
+            })
+        else:
+            if not only_mapped:
+                results.append({
+                    "CRUISE CODE": c_cruise,
+                    "DATE": c_date.strftime("%Y-%m-%d"),
+                    "PORT OF CALL": port_name,
+                    "TIME ZONE": "N/D",
+                    "SUNRISE": "N/D",
+                    "SUNSET": "N/D",
+                    "FILE ROTTA": "Nessuno",
+                    "STATUS": "N/D (Rotta non caricata)",
+                })
 
     # -----------------------------------------------------------------------------
     # OUTPUT TABELLA ED EXPORT EXCEL
@@ -355,7 +355,7 @@ if cal_file and route_files:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.info("Nessun dato da mostrare con i filtri selezionati.")
+        st.info("Nessuna rotta selezionata o caricata. Associa un file CSV a un codice crociera per visualizzare i dati.")
 
 else:
-    st.info("Carica il calendario e i file CSV per iniziare.")
+    st.info("Carica il calendario e i file CSV dalla barra laterale per iniziare.")
