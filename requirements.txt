@@ -5,3 +5,4 @@ folium
 streamlit-folium
 openpyxl
 xlrd
+pip install geopy
