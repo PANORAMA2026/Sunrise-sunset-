@@ -19,7 +19,7 @@ st.write(
 # -----------------------------------------------------------------------------
 
 def parse_coordinate(coord):
-    """Converte coordinate nautiche (es. '33° 45.007' N') o decimali in float."""
+    """Converte coordinate nautiche o decimali in float."""
     if pd.isna(coord):
         return 0.0
     if isinstance(coord, (int, float)):
@@ -54,7 +54,7 @@ def parse_coordinate(coord):
 
 
 def parse_tz_offset(tz_val):
-    """Estrae l'offset orario numerico in ore dal CSV (es. '-07:00:00', '7 W', '-7')."""
+    """Estrae l'offset orario numerico dal CSV."""
     if pd.isna(tz_val):
         return 0.0
     s = str(tz_val).strip()
@@ -81,7 +81,7 @@ def parse_tz_offset(tz_val):
 
 
 def format_tz_string(tz_val, offset_hours):
-    """Formatta la Time Zone per l'output (es. '7 W' o '2 E')."""
+    """Formatta la Time Zone (es. '7 W' o '2 E')."""
     s = str(tz_val).strip()
     if not s or s.lower() == 'nan':
         return "0"
@@ -100,7 +100,7 @@ def format_tz_string(tz_val, offset_hours):
 
 
 def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
-    """Calcola alba e tramonto in ora locale (NOAA)."""
+    """Calcola alba e tramonto in ora locale."""
     try:
         day_of_year = date_obj.timetuple().tm_yday
         declination = 0.409 * math.sin((2 * math.pi / 365) * (day_of_year - 81))
@@ -180,6 +180,10 @@ if cal_file and route_files:
             df_r['dt_local'] = pd.to_datetime(df_r[time_col], dayfirst=True)
             df_r['date_only'] = df_r['dt_local'].dt.date
 
+            # Ricerca nome waypoint/porto nel CSV se esiste
+            name_col = next((c for c in df_r.columns if 'name' in c.lower() or 'waypoint' in c.lower()), None)
+            waypoint_names = df_r[name_col].astype(str).str.lower().tolist() if name_col else []
+
             unique_dates = sorted(df_r['date_only'].dropna().unique())
             if unique_dates:
                 start_d = unique_dates[0]
@@ -191,6 +195,7 @@ if cal_file and route_files:
                     'df': df_r,
                     'num_days': len(unique_dates),
                     'max_rel_day': max(df_r['rel_day'].dropna()),
+                    'waypoint_names': waypoint_names
                 })
         except Exception as e:
             st.sidebar.error(f"Errore nella lettura di {rf.name}: {e}")
@@ -202,8 +207,8 @@ if cal_file and route_files:
     # -----------------------------------------------------------------------------
     # ABBINAMENTO ESPLICITO
     # -----------------------------------------------------------------------------
-    st.subheader("🎯 Abbinamento File Rotta a Crociere/Ricorrenze Specifiche")
-    st.info("Seleziona a quale Crociera/Data del calendario appartiene ciascun file CSV.")
+    st.subheader("🎯 Abbinamento File Rotta")
+    st.info("Associa il file di rotta caricato solo alla specifica crociera a cui si riferisce.")
 
     cruise_options = (
         df_cal[cal_cruise_col].dropna().unique().tolist()
@@ -217,15 +222,15 @@ if cal_file and route_files:
         col1, col2 = st.columns([2, 3])
         with col1:
             st.write(
-                f"📄 **File Rotta:** `{r_info['filename']}` ({r_info['num_days']} giorni di navigazione)"
+                f"📄 **File Rotta:** `{r_info['filename']}` ({r_info['num_days']} giorni)"
             )
         with col2:
             selected_cruises = st.multiselect(
-                f"Associa `{r_info['filename']}` a:",
+                f"Associa `{r_info['filename']}` alla Crociera:",
                 options=cruise_options,
-                default=[],  # Nessuna selezione automatica
+                default=[],
                 key=f"multiselect_{idx}",
-                placeholder="Scegli la crociera dal calendario...",
+                placeholder="Seleziona il codice crociera dal calendario...",
             )
 
             for cruise_id in selected_cruises:
@@ -240,11 +245,11 @@ if cal_file and route_files:
                     'cruise_id': cruise_id,
                     'start_cal_date': start_date,
                     'max_rel_day': r_info['max_rel_day'],
+                    'waypoint_names': r_info['waypoint_names']
                 })
 
-    # Filtro attivo di DEFAULT
-    only_mapped = st.checkbox(
-        "Limita la tabella solo alle crociere/rotte esplicitamente caricate ed abbinate",
+    filter_by_port = st.checkbox(
+        "Filtra anche per corrispondenza Nome Porto / Mare (Escludi porti intermedi non presenti nel CSV)",
         value=True,
     )
 
@@ -273,8 +278,23 @@ if cal_file and route_files:
 
             rel_day = (c_date - r_start_date).days
 
-            # Verifica che il giorno rientri esattamente nella durata della rotta caricata
             if 0 <= rel_day <= max_rel_day:
+                # Controlla se il porto nel calendario coincide con i waypoint o con la rotta
+                if filter_by_port:
+                    port_lower = port_name.lower()
+                    # Se il calendario dice p.es. "Cabo San Lucas" e noi stiamo caricando la rotta Long Beach-Puerto Vallarta,
+                    # verifichiamo se "cabo" compare nei waypoint del CSV. Se non compare, ignoriamo questa riga!
+                    csv_names_str = " ".join(item['waypoint_names'])
+                    
+                    # Estraiamo parole chiave significative dal nome porto (es. "Cabo", "Mazatlan", "Vallarta")
+                    keywords = [w for w in re.findall(r'\w+', port_lower) if len(w) > 3 and w not in ['port', 'puebla', 'dock', 'sea', 'funday']]
+                    
+                    if keywords:
+                        match_found = any(kw in csv_names_str for kw in keywords) or ("fun day" in port_lower and "sea" in csv_names_str)
+                        if not match_found and "fun day" not in port_lower:
+                            # Porto non presente nel CSV -> Salta
+                            continue
+
                 day_points = r_df[r_df['rel_day'] == rel_day]
                 if not day_points.empty:
                     mid_idx = len(day_points) // 2
@@ -321,18 +341,6 @@ if cal_file and route_files:
                 "FILE ROTTA": matched_filename,
                 "STATUS": "OK",
             })
-        else:
-            if not only_mapped:
-                results.append({
-                    "CRUISE CODE": c_cruise,
-                    "DATE": c_date.strftime("%Y-%m-%d"),
-                    "PORT OF CALL": port_name,
-                    "TIME ZONE": "N/D",
-                    "SUNRISE": "N/D",
-                    "SUNSET": "N/D",
-                    "FILE ROTTA": "Nessuno",
-                    "STATUS": "N/D (Rotta non caricata)",
-                })
 
     # -----------------------------------------------------------------------------
     # OUTPUT TABELLA ED EXPORT EXCEL
@@ -355,7 +363,7 @@ if cal_file and route_files:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.info("Nessuna rotta selezionata o caricata. Associa un file CSV a un codice crociera per visualizzare i dati.")
+        st.info("Nessuna rotta corrispondente trovata per la selezione. Assicurati di aver abbinato il file CSV alla crociera corretta.")
 
 else:
     st.info("Carica il calendario e i file CSV dalla barra laterale per iniziare.")
