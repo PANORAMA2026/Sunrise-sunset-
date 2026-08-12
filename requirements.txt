@@ -1,8 +1,9 @@
 streamlit
 pandas
-astral
-folium
-streamlit-folium
 openpyxl
 xlrd
-pip install geopy
+geopy
+folium
+streamlit-folium
+astral
+pytz
