@@ -1,7 +1,7 @@
 import io
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
@@ -11,7 +11,7 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Route Analyzer")
 st.write(
-    "Calcolo di Alba, Tramonto e Time Zone basato esclusivamente sui file rotta caricate."
+    "I file CSV di rotta guidano il calcolo delle effemeridi; il calendario Excel ne pianifica le date di esecuzione."
 )
 
 # -----------------------------------------------------------------------------
@@ -148,7 +148,7 @@ cal_file = st.sidebar.file_uploader(
     "1. Carica Calendario Mensile (Excel)", type=["xlsx", "xls"]
 )
 route_files = st.sidebar.file_uploader(
-    "2. Carica File Rotta (CSV)", type=["csv"], accept_multiple_files=True
+    "2. Carica File Rotta Master (CSV)", type=["csv"], accept_multiple_files=True
 )
 
 if cal_file and route_files:
@@ -158,197 +158,139 @@ if cal_file and route_files:
         (c for c in df_cal.columns if 'date' in c.lower() or 'data' in c.lower()),
         df_cal.columns[0],
     )
-    cal_port_col = next(
-        (c for c in df_cal.columns if 'location' in c.lower() or 'port' in c.lower()),
-        df_cal.columns[1],
-    )
     cal_cruise_col = next(
         (c for c in df_cal.columns if 'cruise' in c.lower() or 'crociera' in c.lower()),
         None,
     )
 
     df_cal['Date_Parsed'] = pd.to_datetime(df_cal[cal_date_col]).dt.date
-    df_cal['Location_Clean'] = df_cal[cal_port_col].astype(str).str.strip()
 
-    routes_data = []
+    # Estrazione delle date di partenza delle crociere dal calendario
+    cruise_start_dates = {}
+    if cal_cruise_col:
+        grouped = df_cal.groupby(cal_cruise_col)['Date_Parsed'].min()
+        for cruise_id, start_d in grouped.items():
+            cruise_start_dates[str(cruise_id)] = start_d
+    else:
+        for idx, d in enumerate(sorted(df_cal['Date_Parsed'].unique())):
+            cruise_start_dates[f"Crociera_{idx+1}"] = d
+
+    # ELABORAZIONE DEI FILE CSV MASTER
+    parsed_routes = []
     for rf in route_files:
         try:
             df_r = pd.read_csv(rf)
+
             time_col = next(
                 c for c in df_r.columns if 'arrival time' in c.lower() or 'time' in c
             )
-            df_r['dt_local'] = pd.to_datetime(df_r[time_col], dayfirst=True)
-            df_r['date_only'] = df_r['dt_local'].dt.date
+            lat_col = next(c for c in df_r.columns if 'lat' in c.lower())
+            lon_col = next(c for c in df_r.columns if 'lon' in c.lower())
+            name_col = next(
+                (c for c in df_r.columns if 'name' in c.lower() or 'waypoint' in c.lower()),
+                None
+            )
+            tz_col = next(
+                (c for c in df_r.columns if any(k in c.lower() for k in ['utc offset', 'time zone', 'timezone', 'offset', 'tz'])),
+                None
+            )
 
-            # Ricerca nome waypoint/porto nel CSV se esiste
-            name_col = next((c for c in df_r.columns if 'name' in c.lower() or 'waypoint' in c.lower()), None)
-            waypoint_names = df_r[name_col].astype(str).str.lower().tolist() if name_col else []
+            df_r['dt_parsed'] = pd.to_datetime(df_r[time_col], dayfirst=True)
+            df_r['date_only'] = df_r['dt_parsed'].dt.date
 
-            unique_dates = sorted(df_r['date_only'].dropna().unique())
-            if unique_dates:
-                start_d = unique_dates[0]
-                df_r['rel_day'] = df_r['date_only'].apply(
-                    lambda d: (d - start_d).days if pd.notnull(d) else None
-                )
-                routes_data.append({
-                    'filename': rf.name,
-                    'df': df_r,
-                    'num_days': len(unique_dates),
-                    'max_rel_day': max(df_r['rel_day'].dropna()),
-                    'waypoint_names': waypoint_names
-                })
+            min_date = df_r['date_only'].min()
+            # Calcolo dei giorni relativi dall'inizio della rotta master (0, 1, 2...)
+            df_r['rel_day'] = df_r['date_only'].apply(lambda d: (d - min_date).days if pd.notnull(d) else 0)
+
+            parsed_routes.append({
+                'filename': rf.name,
+                'df': df_r,
+                'lat_col': lat_col,
+                'lon_col': lon_col,
+                'name_col': name_col,
+                'tz_col': tz_col,
+                'total_days': df_r['rel_day'].max() + 1
+            })
         except Exception as e:
-            st.sidebar.error(f"Errore nella lettura di {rf.name}: {e}")
+            st.sidebar.error(f"Errore nella lettura del file {rf.name}: {e}")
 
-    if not routes_data:
+    if not parsed_routes:
         st.warning("Nessun file rotta valido elaborato.")
         st.stop()
 
     # -----------------------------------------------------------------------------
-    # ABBINAMENTO ESPLICITO
+    # SELEZIONE ED ASSEGNAZIONE DELLE CROCIERE PER CIASCUNA ROTTA CSV
     # -----------------------------------------------------------------------------
-    st.subheader("🎯 Abbinamento File Rotta")
-    st.info("Associa il file di rotta caricato solo alla specifica crociera a cui si riferisce.")
-
-    cruise_options = (
-        df_cal[cal_cruise_col].dropna().unique().tolist()
-        if cal_cruise_col
-        else df_cal['Date_Parsed'].astype(str).unique().tolist()
+    st.subheader("🎯 Assegnazione Rotte alle Crociere del Calendario")
+    st.info(
+        "Seleziona per quali crociere del calendario deve essere eseguito ogni file di rotta CSV."
     )
 
-    mapped_routes_list = []
-
-    for idx, r_info in enumerate(routes_data):
-        col1, col2 = st.columns([2, 3])
-        with col1:
-            st.write(
-                f"📄 **File Rotta:** `{r_info['filename']}` ({r_info['num_days']} giorni)"
-            )
-        with col2:
-            selected_cruises = st.multiselect(
-                f"Associa `{r_info['filename']}` alla Crociera:",
-                options=cruise_options,
-                default=[],
-                key=f"multiselect_{idx}",
-                placeholder="Seleziona il codice crociera dal calendario...",
-            )
-
-            for cruise_id in selected_cruises:
-                if cal_cruise_col:
-                    start_date = df_cal[df_cal[cal_cruise_col] == cruise_id]['Date_Parsed'].min()
-                else:
-                    start_date = pd.to_datetime(cruise_id).date()
-
-                mapped_routes_list.append({
-                    'filename': r_info['filename'],
-                    'df': r_info['df'],
-                    'cruise_id': cruise_id,
-                    'start_cal_date': start_date,
-                    'max_rel_day': r_info['max_rel_day'],
-                    'waypoint_names': r_info['waypoint_names']
-                })
-
-    filter_by_port = st.checkbox(
-        "Filtra anche per corrispondenza Nome Porto / Mare (Escludi porti intermedi non presenti nel CSV)",
-        value=True,
-    )
-
-    # -----------------------------------------------------------------------------
-    # ELABORAZIONE EFFEMERIDI
-    # -----------------------------------------------------------------------------
     results = []
 
-    for _, cal_row in df_cal.iterrows():
-        c_date = cal_row['Date_Parsed']
-        port_name = cal_row['Location_Clean']
-        c_cruise = cal_row[cal_cruise_col] if cal_cruise_col else str(c_date)
+    for r_idx, r_info in enumerate(parsed_routes):
+        st.write(f"### 🚢 Rotta CSV: `{r_info['filename']}` ({r_info['total_days']} giorni di navigazione)")
 
-        matching_waypoint = None
-        matching_tz_val = '0'
-        matched_filename = None
+        selected_cruises = st.multiselect(
+            f"Esegui la rotta `{r_info['filename']}` per le seguenti crociere:",
+            options=list(cruise_start_dates.keys()),
+            default=[],
+            key=f"cruise_select_{r_idx}",
+            placeholder="Scegli le crociere in cui la nave compie questa rotta..."
+        )
 
-        for item in mapped_routes_list:
-            r_df = item['df']
-            r_start_date = item['start_cal_date']
-            r_cruise_id = item['cruise_id']
-            max_rel_day = item['max_rel_day']
+        # GENERAZIONE EFFEMERIDI DIRETTAMENTE DAI PUNTI DELLA ROTTA CSV
+        df_r = r_info['df']
 
-            if c_cruise != r_cruise_id:
-                continue
+        for c_code in selected_cruises:
+            start_date = cruise_start_dates[c_code]
 
-            rel_day = (c_date - r_start_date).days
+            # Raggruppiamo i waypoint della rotta giorno per giorno
+            for rel_day, day_group in df_r.groupby('rel_day'):
+                actual_date = start_date + timedelta(days=int(rel_day))
 
-            if 0 <= rel_day <= max_rel_day:
-                # Controlla se il porto nel calendario coincide con i waypoint o con la rotta
-                if filter_by_port:
-                    port_lower = port_name.lower()
-                    # Se il calendario dice p.es. "Cabo San Lucas" e noi stiamo caricando la rotta Long Beach-Puerto Vallarta,
-                    # verifichiamo se "cabo" compare nei waypoint del CSV. Se non compare, ignoriamo questa riga!
-                    csv_names_str = " ".join(item['waypoint_names'])
-                    
-                    # Estraiamo parole chiave significative dal nome porto (es. "Cabo", "Mazatlan", "Vallarta")
-                    keywords = [w for w in re.findall(r'\w+', port_lower) if len(w) > 3 and w not in ['port', 'puebla', 'dock', 'sea', 'funday']]
-                    
-                    if keywords:
-                        match_found = any(kw in csv_names_str for kw in keywords) or ("fun day" in port_lower and "sea" in csv_names_str)
-                        if not match_found and "fun day" not in port_lower:
-                            # Porto non presente nel CSV -> Salta
-                            continue
+                # Prendiamo il punto mediano del giorno di navigazione
+                mid_point = day_group.iloc[len(day_group) // 2]
 
-                day_points = r_df[r_df['rel_day'] == rel_day]
-                if not day_points.empty:
-                    mid_idx = len(day_points) // 2
-                    matching_waypoint = day_points.iloc[mid_idx]
-                    matched_filename = item['filename']
+                lat = parse_coordinate(mid_point[r_info['lat_col']])
+                lon = parse_coordinate(mid_point[r_info['lon_col']])
 
-                    tz_col = next(
-                        (
-                            c
-                            for c in day_points.columns
-                            if any(
-                                k in c.lower()
-                                for k in [
-                                    'utc offset',
-                                    'time zone',
-                                    'timezone',
-                                    'offset',
-                                    'tz',
-                                ]
-                            )
-                        ),
-                        None,
-                    )
-                    if tz_col:
-                        matching_tz_val = day_points.iloc[0][tz_col]
-                    break
+                waypoint_name = (
+                    str(mid_point[r_info['name_col']])
+                    if r_info['name_col'] and pd.notna(mid_point[r_info['name_col']])
+                    else f"Waypoint Giorno {rel_day}"
+                )
 
-        if matching_waypoint is not None:
-            lat = parse_coordinate(matching_waypoint['Latitude'])
-            lon = parse_coordinate(matching_waypoint['Longitude'])
+                tz_raw = mid_point[r_info['tz_col']] if r_info['tz_col'] else '0'
+                tz_offset = parse_tz_offset(tz_raw)
+                tz_str_formatted = format_tz_string(tz_raw, tz_offset)
 
-            tz_offset = parse_tz_offset(matching_tz_val)
-            tz_str_formatted = format_tz_string(matching_tz_val, tz_offset)
+                sunrise, sunset = calculate_sun_events_native(
+                    lat, lon, actual_date, tz_offset
+                )
 
-            sunrise, sunset = calculate_sun_events_native(lat, lon, c_date, tz_offset)
-
-            results.append({
-                "CRUISE CODE": c_cruise,
-                "DATE": c_date.strftime("%Y-%m-%d"),
-                "PORT OF CALL": port_name,
-                "TIME ZONE": tz_str_formatted,
-                "SUNRISE": sunrise,
-                "SUNSET": sunset,
-                "FILE ROTTA": matched_filename,
-                "STATUS": "OK",
-            })
+                results.append({
+                    "CODICE CROCIERA": c_code,
+                    "DATA": actual_date.strftime("%Y-%m-%d"),
+                    "GIORNO ROTTA": f"Giorno {rel_day + 1}",
+                    "WAYPOINT / NOME": waypoint_name,
+                    "LATITUDINE": lat,
+                    "LONGITUDINE": lon,
+                    "TIME ZONE": tz_str_formatted,
+                    "ALBA (Local Time)": sunrise,
+                    "TRAMONTO (Local Time)": sunset,
+                    "FILE ROTTA ORIGINE": r_info['filename'],
+                })
 
     # -----------------------------------------------------------------------------
-    # OUTPUT TABELLA ED EXPORT EXCEL
+    # TABELLA FINALE ED EXPORT EXCEL
     # -----------------------------------------------------------------------------
     if results:
         df_out = pd.DataFrame(results)
+        df_out = df_out.sort_values(by=["DATA", "CODICE CROCIERA"])
 
-        st.subheader("📊 Risultati Calcolo Effemeridi Navali")
+        st.markdown("---")
+        st.subheader("📊 Risultati Effemeridi Generati dai File CSV Master")
         st.dataframe(df_out, use_container_width=True)
 
         output = io.BytesIO()
@@ -357,13 +299,8 @@ if cal_file and route_files:
         excel_data = output.getvalue()
 
         st.download_button(
-            label="📥 Scarica Tabella Excel",
+            label="📥 Scarica Report Excel Completato",
             data=excel_data,
             file_name=f'Naval_Ephemeris_{datetime.now().strftime("%Y%m%d")}.xlsx',
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    else:
-        st.info("Nessuna rotta corrispondente trovata per la selezione. Assicurati di aver abbinato il file CSV alla crociera corretta.")
-
-else:
-    st.info("Carica il calendario e i file CSV dalla barra laterale per iniziare.")
