@@ -13,15 +13,15 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 # Configurazione della pagina Streamlit
 st.set_page_config(page_title="Gestore Rotte & Effemeridi", layout="wide")
 
-st.title("🚢 Gestore Rotte Navali & Calcolatore Effemeridi")
-st.write("Carica le tue rotte, definisci le date di partenza (anche ripetute) ed esporta il report Excel formattato.")
+st.title("🚢 Calcolatore Effemeridi e Gestore Rotte Navali")
+st.write("Visualizza le effemeridi per le date originali del CSV oppure inserisci nuove date di partenza per ricalcolare la rotta per l'intera sua durata.")
 
 # ----------------------------------------------------
-# FUNZIONI UTILI
+# FUNZIONI UTILI & PARSING
 # ----------------------------------------------------
 
 def parse_coordinate(val):
-    """Converte coordinate in vari formati (es. 33° 45.007' N) in decimali."""
+    """Converte coordinate nautiche (es. 33° 45.007' N) in formato decimale."""
     if pd.isna(val) or isinstance(val, (int, float)):
         return float(val) if pd.notna(val) else None
     
@@ -43,8 +43,33 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
+def parse_user_date(d_str):
+    """Accetta sia AAAA-MM-GG che GG/MM/AAAA."""
+    d_str = d_str.strip()
+    if not d_str:
+        return None
+    
+    # Formato AAAA-MM-GG
+    if '-' in d_str:
+        try:
+            return pd.to_datetime(d_str, format='%Y-%m-%d').date()
+        except Exception:
+            pass
+            
+    # Formato GG/MM/AAAA
+    if '/' in d_str:
+        try:
+            return pd.to_datetime(d_str, dayfirst=True).date()
+        except Exception:
+            pass
+
+    try:
+        return pd.to_datetime(d_str, dayfirst=True).date()
+    except Exception:
+        return None
+
 def format_timezone(offset_seconds):
-    """Formatta l'offset del fuso orario nello stile di Book1.xlsx (es. 7 W, 8 W, 2 E)."""
+    """Formatta l'offset del fuso orario nello stile 7 W / 8 W / 2 E."""
     if pd.isna(offset_seconds):
         return "N/D"
     hours = round(offset_seconds / 3600)
@@ -56,7 +81,7 @@ def format_timezone(offset_seconds):
         return "UTC"
 
 def get_sun_time_local(wp_row, target_event='sunrise'):
-    """Calcola l'orario di alba/tramonto locale per un specifico waypoint."""
+    """Calcola l'orario di alba/tramonto locale per un dato waypoint."""
     lat = wp_row['Lat_Decimal']
     lon = wp_row['Lon_Decimal']
     dt_utc = wp_row['Arrival Time (UTC)']
@@ -82,16 +107,14 @@ def get_sun_time_local(wp_row, target_event='sunrise'):
         return "N/D"
 
 def generate_excel_output(df_report):
-    """Genera un file Excel (.xlsx) formattato esattamente come Book1.xlsx."""
+    """Genera file Excel formattato identico al modello Book1.xlsx."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "EFFEMERIDI"
     
-    # Intestazioni di colonna
     headers = ["DATE", "", "PORT OF CALL", "TIME ZONE", "SUNRISE", "SUNSET"]
     ws.append(headers)
     
-    # Stile Intestazione
     header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     
@@ -101,7 +124,6 @@ def generate_excel_output(df_report):
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
         
-    # Righe Dati
     for _, row in df_report.iterrows():
         ws.append([
             row['DATE'],
@@ -112,7 +134,6 @@ def generate_excel_output(df_report):
             row['SUNSET']
         ])
         
-    # Bordi e Allineamento Dati
     thin_border = Border(
         left=Side(style='thin', color='D9D9D9'),
         right=Side(style='thin', color='D9D9D9'),
@@ -126,7 +147,6 @@ def generate_excel_output(df_report):
             cell.border = thin_border
             cell.alignment = Alignment(horizontal="center", vertical="center")
             
-    # Larghezza Colonne
     ws.column_dimensions['A'].width = 15
     ws.column_dimensions['B'].width = 4
     ws.column_dimensions['C'].width = 32
@@ -140,7 +160,7 @@ def generate_excel_output(df_report):
     return output
 
 # ----------------------------------------------------
-# SIDEBAR: CARICAMENTO & CONFIGURAZIONE DATE
+# SIDEBAR: CARICAMENTO FILE & GESTIONE DATE
 # ----------------------------------------------------
 
 st.sidebar.header("📁 1. Carica File Rotte")
@@ -149,35 +169,34 @@ uploaded_files = st.sidebar.file_uploader("Carica uno o più file CSV (.csv)", t
 route_configs = {}
 
 if uploaded_files:
-    st.sidebar.header("📅 2. Date di Partenza Rotta")
-    st.sidebar.write("Inserisci le date di partenza (separate da virgola) per ripercorrere la stessa rotta in giorni diversi:")
+    st.sidebar.header("📅 2. Date di Partenza")
+    st.sidebar.write("Lascia vuoto per usare la **data originale del CSV**, oppure inserisci nuove date di partenza separate da virgola (es. `2026-08-01, 2026-08-15`):")
 
     for file in uploaded_files:
         st.sidebar.markdown(f"**Rotta:** `{file.name}`")
         dates_str = st.sidebar.text_input(
-            f"Date di Partenza (AAAA-MM-GG):",
-            value=datetime.date.today().strftime("%Y-%m-%d"),
-            key=f"dates_{file.name}"
+            "Nuova Data di Partenza (AAAA-MM-GG o GG/MM/AAAA):",
+            value="",
+            key=f"dates_{file.name}",
+            placeholder="Opzionale (es. 2026-08-01)"
         )
         
-        # Parsing date inserite dall'utente
         parsed_dates = []
-        for d_str in dates_str.split(','):
-            d_str = d_str.strip()
-            if d_str:
-                try:
-                    dt = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
-                    parsed_dates.append(dt)
-                except ValueError:
-                    st.sidebar.warning(f"Formato data non valido '{d_str}'. Usa AAAA-MM-GG.")
+        if dates_str.strip():
+            for d_str in dates_str.split(','):
+                parsed = parse_user_date(d_str)
+                if parsed:
+                    parsed_dates.append(parsed)
+                else:
+                    st.sidebar.warning(f"Formato non valido: '{d_str}'. Usa AAAA-MM-GG o GG/MM/AAAA.")
         
         route_configs[file.name] = {
             'file': file,
-            'start_dates': parsed_dates
+            'start_dates': parsed_dates  # Se vuoto, usera la data originale del CSV
         }
 
 # ----------------------------------------------------
-# MAIN LOGIC & REPORT GENERATION
+# PROCESSING & VISUALIZZAZIONE
 # ----------------------------------------------------
 
 if not uploaded_files:
@@ -188,10 +207,7 @@ else:
 
     for file_name, config in route_configs.items():
         file = config['file']
-        start_dates = config['start_dates']
-
-        if not start_dates:
-            continue
+        user_start_dates = config['start_dates']
 
         # Lettura file CSV
         encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
@@ -208,7 +224,6 @@ else:
             st.error(f"Impossibile leggere il file {file_name}.")
             continue
 
-        # Pulizia colonne
         df_base.columns = df_base.columns.str.replace('ï»¿', '').str.strip()
 
         col_utc = next((c for c in df_base.columns if 'arrival time (utc)' in c.lower()), None)
@@ -219,21 +234,26 @@ else:
         col_wp = next((c for c in df_base.columns if 'waypoint' in c.lower()), None)
 
         if not (col_utc and col_lat and col_lon):
-            st.error(f"Il file {file_name} non contiene tutte le colonne obbligatorie (Latitudine, Longitudine, Arrival Time UTC).")
+            st.error(f"Il file {file_name} non contiene tutte le colonne obbligatorie.")
             continue
 
         df_base['Lat_Decimal'] = df_base[col_lat].apply(parse_coordinate)
         df_base['Lon_Decimal'] = df_base[col_lon].apply(parse_coordinate)
-        df_base['Arrival Time (UTC)'] = pd.to_datetime(df_base[col_utc], errors='coerce')
-        df_base['Arrival Time (Local)'] = pd.to_datetime(df_base[col_local], errors='coerce') if col_local else df_base['Arrival Time (UTC)']
+        
+        # FORZATURA dayfirst=True PER PARSARE CORRETTAMENTE GG/MM/AAAA DAL CSV
+        df_base['Arrival Time (UTC)'] = pd.to_datetime(df_base[col_utc], dayfirst=True, errors='coerce')
+        df_base['Arrival Time (Local)'] = pd.to_datetime(df_base[col_local], dayfirst=True, errors='coerce') if col_local else df_base['Arrival Time (UTC)']
 
-        # Data di partenza originaria del file CSV
-        base_start_datetime = df_base['Arrival Time (Local)'].dropna().iloc[0]
-        base_start_date = base_start_datetime.date()
+        # Data originale del CSV
+        original_base_datetime = df_base['Arrival Time (Local)'].dropna().iloc[0]
+        original_base_date = original_base_datetime.date()
 
-        # Genero l'esecuzione della rotta per OGNI data di partenza richiesta
-        for start_date in start_dates:
-            days_shift = (start_date - base_start_date).days
+        # Se l'utente non specifica nuove date, usa la data originale del CSV
+        target_start_dates = user_start_dates if user_start_dates else [original_base_date]
+
+        # Calcolo rotta per ogni data target
+        for start_date in target_start_dates:
+            days_shift = (start_date - original_base_date).days
             
             df_instance = df_base.copy()
             df_instance['Arrival Time (UTC)'] = df_instance['Arrival Time (UTC)'] + pd.Timedelta(days=days_shift)
@@ -247,7 +267,6 @@ else:
                 if day_df.empty:
                     continue
 
-                # Identificazione Nome Porto / Fun Day at Sea
                 if i == 0:
                     port_of_call = day_df.iloc[0].get(col_name) if col_name and pd.notna(day_df.iloc[0].get(col_name)) else "Porto di Partenza"
                 elif i == len(unique_dates) - 1:
@@ -265,11 +284,11 @@ else:
                 day_df['diff_6pm'] = (day_df['Arrival Time (Local)'] - target_6pm).abs()
                 wp_6pm = day_df.loc[day_df['diff_6pm'].idxmin()]
 
-                # Calcolo Fuso Orario (Time Zone)
+                # Timezone
                 offset_sec = (wp_7am['Arrival Time (Local)'] - wp_7am['Arrival Time (UTC)']).total_seconds()
                 time_zone_str = format_timezone(offset_sec)
 
-                # Calcolo Effemeridi
+                # Effemeridi
                 sunrise_str = get_sun_time_local(wp_7am, 'sunrise')
                 sunset_str = get_sun_time_local(wp_6pm, 'sunset')
 
@@ -287,16 +306,12 @@ else:
     if all_summary_rows:
         df_report_full = pd.DataFrame(all_summary_rows)
 
-        # ----------------------------------------------------
-        # OUTPUT VISUALE & DOWNLOAD
-        # ----------------------------------------------------
-        st.subheader("📊 Report Giornaliero Effemeridi (Tutte le Rotte & Date)")
+        st.subheader("📊 Report Effemeridi Calcolato")
         st.dataframe(df_report_full[['DATE', 'PORT OF CALL', 'TIME ZONE', 'SUNRISE', 'SUNSET', 'ROTTA']], use_container_width=True)
 
         col_dl1, col_dl2 = st.columns(2)
 
         with col_dl1:
-            # Download File Excel Formattato (come Book1.xlsx)
             excel_bytes = generate_excel_output(df_report_full)
             st.download_button(
                 label="🟢 Scarica Report in Excel (.xlsx)",
@@ -306,7 +321,6 @@ else:
             )
 
         with col_dl2:
-            # Download CSV
             csv_data = df_report_full[['DATE', 'PORT OF CALL', 'TIME ZONE', 'SUNRISE', 'SUNSET']].to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📄 Scarica Report in CSV",
@@ -315,7 +329,6 @@ else:
                 mime="text/csv"
             )
 
-        # Mappa della Rotta
         st.subheader("🗺️ Mappa Interattiva delle Rotte")
         combined_points = pd.concat([df.dropna(subset=['Lat_Decimal', 'Lon_Decimal']) for df in all_route_dfs])
         if not combined_points.empty:
