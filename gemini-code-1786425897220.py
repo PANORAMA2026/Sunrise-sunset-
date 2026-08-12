@@ -3,24 +3,19 @@ import pandas as pd
 import datetime
 import re
 import io
-import urllib.request
-import json
 import pydeck as pdk
-import folium
-from streamlit_folium import st_folium
 from astral import LocationInfo
 from astral.sun import sun
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-# Configurazione della pagina Streamlit
-st.set_page_config(page_title="Gestore Rotte & Effemeridi", layout="wide")
+st.set_page_config(page_title="Gestore Effemeridi & Calendario Crociere", layout="wide")
 
-st.title("🚢 Calcolatore Effemeridi e Gestore Rotte Navali")
-st.write("Visualizza le effemeridi per la rotta con identificazione automatica dei porti, giorni di navigazione (Seaday) e mappa interattiva.")
+st.title("🚢 Generatore Effemeridi da Calendario Crociere (Date, Location, ETA, ETD)")
+st.write("Carica il file Excel del **Calendario Crociere** e il file CSV della **Rotta Navale** per calcolare automaticamente le effemeridi locali.")
 
 # ----------------------------------------------------
-# FUNZIONI UTILI, REVERSE GEOCODING & PARSING
+# FUNZIONI UTILI & PARSING
 # ----------------------------------------------------
 
 def parse_coordinate(val):
@@ -46,46 +41,8 @@ def parse_coordinate(val):
     except ValueError:
         return None
 
-def get_port_name_from_coords(lat, lon):
-    """Effettua il Reverse Geocoding usando OpenStreetMap Nominatim per trovare il nome del porto/città."""
-    if lat is None or lon is None:
-        return "N/D"
-    try:
-        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-        req = urllib.request.Request(url, headers={'User-Agent': 'NavalRoutePlanner/1.0'})
-        with urllib.request.urlopen(req, timeout=3) as response:
-            data = json.loads(response.read().decode())
-            address = data.get('address', {})
-            port = address.get('port') or address.get('city') or address.get('town') or address.get('village') or address.get('county')
-            return port.upper() if port else "PORTO"
-    except Exception:
-        return "PORTO"
-
-def parse_user_date(d_str):
-    """Accetta sia AAAA-MM-GG che GG/MM/AAAA."""
-    d_str = d_str.strip()
-    if not d_str:
-        return None
-    
-    if '-' in d_str:
-        try:
-            return pd.to_datetime(d_str, format='%Y-%m-%d').date()
-        except Exception:
-            pass
-            
-    if '/' in d_str:
-        try:
-            return pd.to_datetime(d_str, dayfirst=True).date()
-        except Exception:
-            pass
-
-    try:
-        return pd.to_datetime(d_str, dayfirst=True).date()
-    except Exception:
-        return None
-
 def format_timezone(offset_seconds):
-    """Formatta l'offset del fuso orario nello stile 7 W / 8 W / 2 E."""
+    """Formatta l'offset del fuso orario nello stile 7 W / 8 W / 2 E / UTC."""
     if pd.isna(offset_seconds):
         return "N/D"
     hours = round(offset_seconds / 3600)
@@ -122,8 +79,20 @@ def get_sun_time_local(wp_row, target_event='sunrise'):
     except Exception:
         return "N/D"
 
+def parse_cruise_calendar(excel_file):
+    """Legge il file Excel del calendario crociere riconoscendo Date, Location, ETA, ETD."""
+    df_cal = pd.read_excel(excel_file)
+    col_map = {str(c).strip().lower(): c for c in df_cal.columns}
+    
+    date_col = col_map.get('date')
+    loc_col = col_map.get('location')
+    eta_col = col_map.get('eta')
+    etd_col = col_map.get('etd')
+    
+    return df_cal, date_col, loc_col, eta_col, etd_col
+
 def generate_excel_output(df_report):
-    """Genera file Excel formattato."""
+    """Genera file Excel formattato secondo il layout standard."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "EFFEMERIDI"
@@ -176,283 +145,180 @@ def generate_excel_output(df_report):
     return output
 
 # ----------------------------------------------------
-# SIDEBAR: CONFIGURAZIONE
+# BARRA LATERALE: CARICAMENTO FILE
 # ----------------------------------------------------
 
-st.sidebar.header("📁 1. Carica File Rotte")
-uploaded_files = st.sidebar.file_uploader("Carica uno o più file CSV (.csv)", type=["csv"], accept_multiple_files=True)
+st.sidebar.header("📁 1. Calendario Crociere (Excel)")
+calendar_file = st.sidebar.file_uploader("Carica Calendario Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
-route_configs = {}
-
-if uploaded_files:
-    st.sidebar.header("📅 2. Impostazioni Rotta e Porti")
-
-    for file in uploaded_files:
-        st.sidebar.markdown(f"---")
-        st.sidebar.markdown(f"**File:** `{file.name}`")
-        
-        encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
-        df_preview = None
-        for enc in encodings:
-            try:
-                file.seek(0)
-                df_preview = pd.read_csv(file, encoding=enc, sep=None, engine='python')
-                break
-            except Exception:
-                continue
-
-        auto_dep = "PORTO DI PARTENZA"
-        auto_arr = "PORTO DI ARRIVO"
-
-        if df_preview is not None:
-            df_preview.columns = df_preview.columns.str.replace('ï»¿', '').str.strip()
-            col_lat = next((c for c in df_preview.columns if 'latitude' in c.lower()), None)
-            col_lon = next((c for c in df_preview.columns if 'longitude' in c.lower()), None)
-            
-            if col_lat and col_lon:
-                first_lat = parse_coordinate(df_preview.iloc[0][col_lat])
-                first_lon = parse_coordinate(df_preview.iloc[0][col_lon])
-                last_lat = parse_coordinate(df_preview.iloc[-1][col_lat])
-                last_lon = parse_coordinate(df_preview.iloc[-1][col_lon])
-
-                auto_dep = get_port_name_from_coords(first_lat, first_lon)
-                auto_arr = get_port_name_from_coords(last_lat, last_lon)
-
-        dep_port = st.sidebar.text_input("Porto di Partenza:", value=auto_dep, key=f"dep_{file.name}")
-        arr_port = st.sidebar.text_input("Porto di Arrivo:", value=auto_arr, key=f"arr_{file.name}")
-        
-        dates_str = st.sidebar.text_input(
-            "Nuova Data di Partenza (AAAA-MM-GG o GG/MM/AAAA):",
-            value="",
-            key=f"dates_{file.name}",
-            placeholder="Opzionale (es. 2026-08-01)"
-        )
-        
-        parsed_dates = []
-        if dates_str.strip():
-            for d_str in dates_str.split(','):
-                parsed = parse_user_date(d_str)
-                if parsed:
-                    parsed_dates.append(parsed)
-                else:
-                    st.sidebar.warning(f"Formato non valido: '{d_str}'. Usa AAAA-MM-GG o GG/MM/AAAA.")
-        
-        route_configs[file.name] = {
-            'file': file,
-            'start_dates': parsed_dates,
-            'dep_port': dep_port,
-            'arr_port': arr_port
-        }
+st.sidebar.header("🗺️ 2. Rotta Navale (CSV)")
+route_files = st.sidebar.file_uploader("Carica file Rotta CSV (.csv)", type=["csv"], accept_multiple_files=True)
 
 # ----------------------------------------------------
-# PROCESSING & TABELLA DI OUTPUT
+# ELABORAZIONE
 # ----------------------------------------------------
 
-if not uploaded_files:
-    st.info("👋 Carica uno o più file CSV di rotta dalla barra laterale per iniziare.")
+if not calendar_file or not route_files:
+    st.info("👈 Carica il file **Calendario Excel** e almeno un file **CSV di Rotta** dalla barra laterale per proseguire.")
 else:
-    all_summary_rows = []
-    all_route_dfs = []
+    # 1. LETTURA ED ESTRAZIONE COLONNE CALENDARIO
+    try:
+        df_cal_raw, auto_date, auto_loc, auto_eta, auto_etd = parse_cruise_calendar(calendar_file)
+    except Exception as e:
+        st.error(f"Errore nella lettura del file Excel: {e}")
+        st.stop()
 
-    for file_name, config in route_configs.items():
-        file = config['file']
-        user_start_dates = config['start_dates']
-        dep_port_name = config['dep_port']
-        arr_port_name = config['arr_port']
+    cols = list(df_cal_raw.columns)
+    
+    st.subheader("⚙️ Verifica Mappatura Colonne Calendario")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        sel_date = st.selectbox("Colonna DATE:", cols, index=cols.index(auto_date) if auto_date in cols else 0)
+    with c2:
+        sel_loc = st.selectbox("Colonna LOCATION:", cols, index=cols.index(auto_loc) if auto_loc in cols else min(1, len(cols)-1))
+    with c3:
+        sel_eta = st.selectbox("Colonna ETA (Opzionale):", ["Nessuna"] + cols, index=(cols.index(auto_eta)+1) if auto_eta in cols else 0)
+    with c4:
+        sel_etd = st.selectbox("Colonna ETD (Opzionale):", ["Nessuna"] + cols, index=(cols.index(auto_etd)+1) if auto_etd in cols else 0)
 
+    # Pulizia e strutturazione dati del calendario
+    df_cal = df_cal_raw.copy()
+    df_cal['Date_Parsed'] = pd.to_datetime(df_cal[sel_date], errors='coerce').dt.date
+    df_cal = df_cal.dropna(subset=['Date_Parsed']).copy()
+    df_cal['Location_Clean'] = df_cal[sel_loc].astype(str).str.strip()
+
+    # Eliminazione duplicati sullo stesso giorno dando priorità allo scalo reale rispetto a "at Sea"
+    def deduplicate_day(group):
+        if len(group) == 1:
+            return group.iloc[0]
+        non_sea = group[~group['Location_Clean'].str.contains('Sea', case=False, na=False)]
+        if not non_sea.empty:
+            return non_sea.iloc[0]
+        return group.iloc[0]
+
+    df_cal = df_cal.groupby('Date_Parsed', as_index=False, group_keys=False).apply(deduplicate_day).reset_index(drop=True)
+
+    # 2. LETTURA ED UNIONE ROTTE CSV
+    all_route_waypoints = []
+    for r_file in route_files:
         encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
-        df_base = None
+        df_r = None
         for enc in encodings:
             try:
-                file.seek(0)
-                df_base = pd.read_csv(file, encoding=enc, sep=None, engine='python')
+                r_file.seek(0)
+                df_r = pd.read_csv(r_file, encoding=enc, sep=None, engine='python')
                 break
             except Exception:
                 continue
 
-        if df_base is None:
-            st.error(f"Impossibile leggere il file {file_name}.")
-            continue
+        if df_r is not None:
+            df_r.columns = df_r.columns.str.replace('ï»¿', '').str.strip()
+            c_utc = next((c for c in df_r.columns if 'arrival time (utc)' in c.lower()), None)
+            c_local = next((c for c in df_r.columns if 'arrival time (local)' in c.lower()), None)
+            c_lat = next((c for c in df_r.columns if 'latitude' in c.lower()), None)
+            c_lon = next((c for c in df_r.columns if 'longitude' in c.lower()), None)
 
-        df_base.columns = df_base.columns.str.replace('ï»¿', '').str.strip()
+            if c_utc and c_lat and c_lon:
+                df_r['Lat_Decimal'] = df_r[c_lat].apply(parse_coordinate)
+                df_r['Lon_Decimal'] = df_r[c_lon].apply(parse_coordinate)
+                df_r['Arrival Time (UTC)'] = pd.to_datetime(df_r[c_utc], dayfirst=True, errors='coerce')
+                df_r['Arrival Time (Local)'] = pd.to_datetime(df_r[c_local], dayfirst=True, errors='coerce') if c_local else df_r['Arrival Time (UTC)']
+                all_route_waypoints.append(df_r)
 
-        col_utc = next((c for c in df_base.columns if 'arrival time (utc)' in c.lower()), None)
-        col_local = next((c for c in df_base.columns if 'arrival time (local)' in c.lower()), None)
-        col_lat = next((c for c in df_base.columns if 'latitude' in c.lower()), None)
-        col_lon = next((c for c in df_base.columns if 'longitude' in c.lower()), None)
+    if not all_route_waypoints:
+        st.error("Nessun file di rotta valido caricato o colonne obbligatorie mancanti (Latitude, Longitude, Arrival Time UTC).")
+        st.stop()
 
-        if not (col_utc and col_lat and col_lon):
-            st.error(f"Il file {file_name} non contiene tutte le colonne obbligatorie.")
-            continue
+    df_full_route = pd.concat(all_route_waypoints, ignore_index=True)
+    route_dates = sorted(df_full_route['Arrival Time (Local)'].dt.date.dropna().unique())
+    days_in_route = len(route_dates)
+    cal_start_date = df_cal['Date_Parsed'].iloc[0]
 
-        df_base['Lat_Decimal'] = df_base[col_lat].apply(parse_coordinate)
-        df_base['Lon_Decimal'] = df_base[col_lon].apply(parse_coordinate)
+    # 3. ELABORAZIONE CALENDARIO - CALCOLO EFFEMERIDI
+    summary_rows = []
+    processed_dfs = []
+
+    for _, cal_row in df_cal.iterrows():
+        c_date = cal_row['Date_Parsed']
+        port_name = cal_row['Location_Clean']
         
-        df_base['Arrival Time (UTC)'] = pd.to_datetime(df_base[col_utc], dayfirst=True, errors='coerce')
-        df_base['Arrival Time (Local)'] = pd.to_datetime(df_base[col_local], dayfirst=True, errors='coerce') if col_local else df_base['Arrival Time (UTC)']
+        # Mappatura del giorno del calendario sulla sequenza waypoint della rotta
+        day_offset = (c_date - cal_start_date).days % days_in_route
+        target_route_date = route_dates[day_offset]
 
-        original_base_datetime = df_base['Arrival Time (Local)'].dropna().iloc[0]
-        original_base_date = original_base_datetime.date()
+        day_route = df_full_route[df_full_route['Arrival Time (Local)'].dt.date == target_route_date].copy()
+        if day_route.empty:
+            continue
 
-        target_start_dates = user_start_dates if user_start_dates else [original_base_date]
+        time_shift = pd.Timestamp(c_date) - pd.Timestamp(target_route_date)
+        day_route['Arrival Time (UTC)'] = day_route['Arrival Time (UTC)'] + time_shift
+        day_route['Arrival Time (Local)'] = day_route['Arrival Time (Local)'] + time_shift
 
-        for start_date in target_start_dates:
-            days_shift = (start_date - original_base_date).days
-            
-            df_instance = df_base.copy()
-            df_instance['Arrival Time (UTC)'] = df_instance['Arrival Time (UTC)'] + pd.Timedelta(days=days_shift)
-            df_instance['Arrival Time (Local)'] = df_instance['Arrival Time (Local)'] + pd.Timedelta(days=days_shift)
-            df_instance['Date_Local'] = df_instance['Arrival Time (Local)'].dt.date
-            
-            unique_dates = sorted(df_instance['Date_Local'].dropna().unique())
+        # Punto rotta ore 07:00 (Alba) e ore 18:00 (Tramonto)
+        target_7am = pd.Timestamp.combine(c_date, datetime.time(7, 0))
+        day_route['diff_7am'] = (day_route['Arrival Time (Local)'] - target_7am).abs()
+        wp_7am = day_route.loc[day_route['diff_7am'].idxmin()]
 
-            for i, d in enumerate(unique_dates):
-                day_df = df_instance[df_instance['Date_Local'] == d].copy()
-                if day_df.empty:
-                    continue
+        target_6pm = pd.Timestamp.combine(c_date, datetime.time(18, 0))
+        day_route['diff_6pm'] = (day_route['Arrival Time (Local)'] - target_6pm).abs()
+        wp_6pm = day_route.loc[day_route['diff_6pm'].idxmin()]
 
-                if i == 0:
-                    port_of_call = dep_port_name
-                elif i == len(unique_dates) - 1:
-                    port_of_call = arr_port_name
-                else:
-                    port_of_call = "Seaday"
+        offset_sec = (wp_7am['Arrival Time (Local)'] - wp_7am['Arrival Time (UTC)']).total_seconds()
+        tz_str = format_timezone(offset_sec)
 
-                target_7am = pd.Timestamp.combine(d, datetime.time(7, 0))
-                day_df['diff_7am'] = (day_df['Arrival Time (Local)'] - target_7am).abs()
-                wp_7am = day_df.loc[day_df['diff_7am'].idxmin()]
+        sunrise_str = get_sun_time_local(wp_7am, 'sunrise')
+        sunset_str = get_sun_time_local(wp_6pm, 'sunset')
 
-                target_6pm = pd.Timestamp.combine(d, datetime.time(18, 0))
-                day_df['diff_6pm'] = (day_df['Arrival Time (Local)'] - target_6pm).abs()
-                wp_6pm = day_df.loc[day_df['diff_6pm'].idxmin()]
+        summary_rows.append({
+            'DATE': c_date.strftime('%Y-%m-%d'),
+            'PORT OF CALL': port_name,
+            'TIME ZONE': tz_str,
+            'SUNRISE': sunrise_str,
+            'SUNSET': sunset_str
+        })
+        processed_dfs.append(day_route)
 
-                offset_sec = (wp_7am['Arrival Time (Local)'] - wp_7am['Arrival Time (UTC)']).total_seconds()
-                time_zone_str = format_timezone(offset_sec)
-
-                sunrise_str = get_sun_time_local(wp_7am, 'sunrise')
-                sunset_str = get_sun_time_local(wp_6pm, 'sunset')
-
-                all_summary_rows.append({
-                    'DATE': d.strftime('%Y-%m-%d'),
-                    'PORT OF CALL': port_of_call,
-                    'TIME ZONE': time_zone_str,
-                    'SUNRISE': sunrise_str,
-                    'SUNSET': sunset_str,
-                    'ROTTA': file_name
-                })
-
-            all_route_dfs.append(df_instance)
-
-    if all_summary_rows:
-        df_report_full = pd.DataFrame(all_summary_rows)
+    # 4. TABELLA DI OUTPUT E DOWNLOAD
+    if summary_rows:
+        df_result = pd.DataFrame(summary_rows)
 
         st.subheader("📊 Report Effemeridi Calcolato")
-        st.dataframe(df_report_full[['DATE', 'PORT OF CALL', 'TIME ZONE', 'SUNRISE', 'SUNSET', 'ROTTA']], use_container_width=True)
+        st.dataframe(df_result, use_container_width=True)
 
         col_dl1, col_dl2 = st.columns(2)
-
         with col_dl1:
-            excel_bytes = generate_excel_output(df_report_full)
+            excel_bytes = generate_excel_output(df_result)
             st.download_button(
-                label="🟢 Scarica Report in Excel (.xlsx)",
+                label="🟢 Scarica Report Excel (.xlsx)",
                 data=excel_bytes,
-                file_name="Effemeridi_Rotte_Navali.xlsx",
+                file_name="Effemeridi_Calendario_Crociere.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         with col_dl2:
-            csv_data = df_report_full[['DATE', 'PORT OF CALL', 'TIME ZONE', 'SUNRISE', 'SUNSET']].to_csv(index=False).encode('utf-8')
+            csv_data = df_result.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📄 Scarica Report in CSV",
+                label="📄 Scarica Report CSV",
                 data=csv_data,
-                file_name="Effemeridi_Rotte_Navali.csv",
+                file_name="Effemeridi_Calendario_Crociere.csv",
                 mime="text/csv"
             )
 
-        # ----------------------------------------------------
-        # MAPPA INTERATTIVA (PyDeck Nativa / Folium)
-        # ----------------------------------------------------
-        st.subheader("🗺️ Mappa Interattiva della Rotta Navale")
-
-        map_engine = st.radio(
-            "Seleziona il motore di visualizzazione della mappa:",
-            ["Mappa Nativa Streamlit (PyDeck - Consigliata)", "Mappa Marittima Folium (Esri Ocean)"],
-            horizontal=True
-        )
-
-        all_points = []
-        lines_data = []
-
-        for df_inst in all_route_dfs:
-            valid_pts = df_inst.dropna(subset=['Lat_Decimal', 'Lon_Decimal'])
-            if not valid_pts.empty:
-                coords = valid_pts[['Lon_Decimal', 'Lat_Decimal']].values.tolist()
-                lines_data.append({"path": coords})
-                for _, r in valid_pts.iterrows():
-                    all_points.append({
-                        'lat': r['Lat_Decimal'],
-                        'lon': r['Lon_Decimal'],
-                        'time': str(r['Arrival Time (Local)'])
-                    })
-
-        df_pts = pd.DataFrame(all_points)
-
-        if not df_pts.empty:
-            avg_lat = df_pts['lat'].mean()
-            avg_lon = df_pts['lon'].mean()
-
-            if "PyDeck" in map_engine:
-                # MAPPA NATIVA PYDECK (Esente da problemi di iframe/schermata bianca)
-                view_state = pdk.ViewState(
-                    latitude=avg_lat,
-                    longitude=avg_lon,
-                    zoom=4,
-                    pitch=20
-                )
-
-                line_layer = pdk.Layer(
-                    "PathLayer",
-                    lines_data,
-                    get_path="path",
-                    get_color=[31, 78, 120, 255],
-                    width_scale=20,
-                    width_min_pixels=3,
-                    pickable=True
-                )
-
-                point_layer = pdk.Layer(
-                    "ScatterplotLayer",
-                    df_pts,
-                    get_position=["lon", "lat"],
-                    get_color=[230, 50, 50, 200],
-                    get_radius=5000,
-                    radius_min_pixels=4,
-                    pickable=True
-                )
-
-                r_map = pdk.Deck(
-                    layers=[line_layer, point_layer],
-                    initial_view_state=view_state,
-                    map_style="mapbox://styles/mapbox/navigation-day-v1",
-                    tooltip={"text": "Posizione: {lat}, {lon}\nOrario: {time}"}
-                )
-                st.pydeck_chart(r_map)
-
-            else:
-                # MAPPA FOLIUM CON TILE OCEANICHE ESRI (Evita blocchi CORS di OSM)
-                esri_ocean_tiles = "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
-                esri_attr = "Esri, GEBCO, NOAA, CHS, National Geographic"
-
-                m = folium.Map(
-                    location=[avg_lat, avg_lon],
-                    zoom_start=4,
-                    tiles=esri_ocean_tiles,
-                    attr=esri_attr
-                )
-
-                for df_inst in all_route_dfs:
-                    pts = list(zip(df_inst['Lat_Decimal'], df_inst['Lon_Decimal']))
-                    folium.PolyLine(pts, color="#1F4E78", weight=4, opacity=0.85).add_to(m)
-
-                # returned_objects=[] evita che la pagina si ricarichi ad ogni interazione
-                st_folium(m, width=900, height=500, returned_objects=[])
+        # 5. VISUALIZZAZIONE MAPPA INTERATTIVA (PyDeck)
+        st.subheader("🗺️ Mappa della Rotta Proiettata")
+        combined_pts = pd.concat([df.dropna(subset=['Lat_Decimal', 'Lon_Decimal']) for df in processed_dfs])
+        if not combined_pts.empty:
+            path_coords = combined_pts[['Lon_Decimal', 'Lat_Decimal']].values.tolist()
+            view_state = pdk.ViewState(
+                latitude=combined_pts['Lat_Decimal'].mean(),
+                longitude=combined_pts['Lon_Decimal'].mean(),
+                zoom=4
+            )
+            line_layer = pdk.Layer(
+                "PathLayer",
+                [{"path": path_coords}],
+                get_path="path",
+                get_color=[31, 78, 120, 255],
+                width_scale=20,
+                width_min_pixels=3
+            )
+            st.pydeck_chart(pdk.Deck(layers=[line_layer], initial_view_state=view_state))
