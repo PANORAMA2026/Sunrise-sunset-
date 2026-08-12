@@ -1,7 +1,7 @@
 import io
 import math
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
@@ -22,7 +22,7 @@ st.write(
 def parse_coordinate(coord):
     """
     Converte coordinate nautiche (es. "33° 45.007' N" o "118° 11.209' W")
-    o numeriche in gradi decimali trasformabili in float.
+    o numeriche in gradi decimali float.
     """
     if pd.isna(coord):
         return 0.0
@@ -47,7 +47,7 @@ def parse_coordinate(coord):
             decimal_degrees = -decimal_degrees
         return decimal_degrees
         
-    # Formato con direzione finale senza gradi (es. 33.7501 N)
+    # Formato con direzione finale (es. 33.7501 N)
     match_simple = re.search(r"([+-]?\d+(?:\.\d+)?)\s*([NSEWnsew]?)", s)
     if match_simple:
         val = float(match_simple.group(1))
@@ -59,41 +59,68 @@ def parse_coordinate(coord):
     return 0.0
 
 
-def parse_tz_offset(tz_str):
-    """Estrae l'offset orario numerico in ore da stringhe come '7 W', '8 W', '2 E'."""
-    if not isinstance(tz_str, str):
+def parse_tz_offset(tz_val):
+    """
+    Estrae l'offset orario numerico in ore da vari formati CSV:
+    "-07:00:00", "+02:00", "7 W", "2 E", "-7", "7"
+    """
+    if pd.isna(tz_val):
         return 0.0
-    match = re.search(r'(\d+(?:\.\d+)?)\s*([WEwe]?)', tz_str.strip())
-    if not match:
+    s = str(tz_val).strip()
+    if not s or s.lower() == 'nan':
         return 0.0
-    val = float(match.group(1))
-    direction = match.group(2).upper()
-    return -val if direction == 'W' else val
+
+    # Formato HH:MM:SS o HH:MM (es. "-07:00:00", "+02:00")
+    match_hhmmss = re.search(r'([+-]?)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?', s)
+    if match_hhmmss:
+        sign = -1.0 if match_hhmmss.group(1) == '-' else 1.0
+        hours = float(match_hhmmss.group(2))
+        minutes = float(match_hhmmss.group(3))
+        return sign * (hours + minutes / 60.0)
+
+    # Formato W / E (es. "7 W", "2 E")
+    match_we = re.search(r'(\d+(?:\.\d+)?)\s*([WEwe])', s)
+    if match_we:
+        val = float(match_we.group(1))
+        direction = match_we.group(2).upper()
+        return -val if direction == 'W' else val
+
+    # Numero semplice (es. "-7", "2")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
 
 
-def format_tz_string(tz_str):
-    """Standardizza il formato della Time Zone per l'output (es. '7 W')."""
-    if not isinstance(tz_str, str) or not tz_str.strip():
-        return '0'
-    match = re.search(r'(\d+(?:\.\d+)?)\s*([WEwe]?)', tz_str.strip())
-    if not match:
-        return tz_str.strip()
-    val = match.group(1)
-    direction = match.group(2).upper()
-    return f'{val} {direction}'.strip()
+def format_tz_string(tz_val, offset_hours):
+    """Formatta la Time Zone in formato leggibile per la tabella (es. '7 W' o '2 E')."""
+    s = str(tz_val).strip()
+    if not s or s.lower() == 'nan':
+        return "0"
+    
+    match_we = re.search(r'(\d+(?:\.\d+)?)\s*([WEwe])', s)
+    if match_we:
+        return f"{match_we.group(1)} {match_we.group(2).upper()}"
+        
+    if offset_hours == 0:
+        return "0"
+    
+    abs_h = abs(offset_hours)
+    h_str = f"{int(abs_h)}" if abs_h.is_integer() else f"{abs_h}"
+    direction = "W" if offset_hours < 0 else "E"
+    return f"{h_str} {direction}"
 
 
 def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
-    """Calcola alba e tramonto in ora locale usando formule astronomiche standard (NOAA)."""
+    """Calcola alba e tramonto in ora locale usando formule astronomiche NOAA."""
     try:
         day_of_year = date_obj.timetuple().tm_yday
 
         # Declinazione solare (radianti)
         declination = 0.409 * math.sin((2 * math.pi / 365) * (day_of_year - 81))
-
         lat_rad = math.radians(lat)
 
-        # Angolo orario dell'alba/tramonto (-0.833° tiene conto di rifrazione e diametro)
+        # Angolo orario dell'alba/tramonto
         cos_ha = (
             math.sin(math.radians(-0.833))
             - math.sin(lat_rad) * math.sin(declination)
@@ -242,7 +269,7 @@ if cal_file and route_files:
         c_cruise = cal_row[cal_cruise_col] if cal_cruise_col else None
 
         matching_waypoint = None
-        matching_tz = '0'
+        matching_tz_val = '0'
 
         for item in mapped_routes_list:
             r_df = item['df']
@@ -260,15 +287,34 @@ if cal_file and route_files:
                     mid_idx = len(day_points) // 2
                     matching_waypoint = day_points.iloc[mid_idx]
 
-                    if 'Time Zone' in day_points.columns:
-                        matching_tz = str(day_points.iloc[0]['Time Zone'])
+                    # Ricerca dinamica della colonna Time Zone o UTC Offset
+                    tz_col = next(
+                        (
+                            c
+                            for c in day_points.columns
+                            if any(
+                                k in c.lower()
+                                for k in [
+                                    'utc offset',
+                                    'time zone',
+                                    'timezone',
+                                    'offset',
+                                    'tz',
+                                ]
+                            )
+                        ),
+                        None,
+                    )
+                    if tz_col:
+                        matching_tz_val = day_points.iloc[0][tz_col]
                     break
 
         if matching_waypoint is not None:
             lat = parse_coordinate(matching_waypoint['Latitude'])
             lon = parse_coordinate(matching_waypoint['Longitude'])
-            tz_offset = parse_tz_offset(matching_tz)
-            tz_str_formatted = format_tz_string(matching_tz)
+            
+            tz_offset = parse_tz_offset(matching_tz_val)
+            tz_str_formatted = format_tz_string(matching_tz_val, tz_offset)
 
             sunrise, sunset = calculate_sun_events_native(lat, lon, c_date, tz_offset)
             status = "OK"
