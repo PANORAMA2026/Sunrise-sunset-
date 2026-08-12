@@ -5,6 +5,7 @@ import re
 import io
 import urllib.request
 import json
+import pydeck as pdk
 import folium
 from streamlit_folium import st_folium
 from astral import LocationInfo
@@ -16,7 +17,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 st.set_page_config(page_title="Gestore Rotte & Effemeridi", layout="wide")
 
 st.title("🚢 Calcolatore Effemeridi e Gestore Rotte Navali")
-st.write("Visualizza le effemeridi per la rotta con identificazione automatica dei porti e giorni di navigazione (Seaday).")
+st.write("Visualizza le effemeridi per la rotta con identificazione automatica dei porti, giorni di navigazione (Seaday) e mappa interattiva.")
 
 # ----------------------------------------------------
 # FUNZIONI UTILI, REVERSE GEOCODING & PARSING
@@ -55,7 +56,6 @@ def get_port_name_from_coords(lat, lon):
         with urllib.request.urlopen(req, timeout=3) as response:
             data = json.loads(response.read().decode())
             address = data.get('address', {})
-            # Cerca nell'ordine: nome del porto, città, comune o paese
             port = address.get('port') or address.get('city') or address.get('town') or address.get('village') or address.get('county')
             return port.upper() if port else "PORTO"
     except Exception:
@@ -191,7 +191,6 @@ if uploaded_files:
         st.sidebar.markdown(f"---")
         st.sidebar.markdown(f"**File:** `{file.name}`")
         
-        # Lettura preliminare per individuare i punti estremi della rotta
         encodings = ['utf-8-sig', 'utf-8', 'latin1', 'cp1252']
         df_preview = None
         for enc in encodings:
@@ -216,11 +215,9 @@ if uploaded_files:
                 last_lat = parse_coordinate(df_preview.iloc[-1][col_lat])
                 last_lon = parse_coordinate(df_preview.iloc[-1][col_lon])
 
-                # Calcolo automatico tramite Reverse Geocoding
                 auto_dep = get_port_name_from_coords(first_lat, first_lon)
                 auto_arr = get_port_name_from_coords(last_lat, last_lon)
 
-        # Input utente con valore precompilato dall'algoritmo
         dep_port = st.sidebar.text_input("Porto di Partenza:", value=auto_dep, key=f"dep_{file.name}")
         arr_port = st.sidebar.text_input("Porto di Arrivo:", value=auto_arr, key=f"arr_{file.name}")
         
@@ -314,7 +311,6 @@ else:
                 if day_df.empty:
                     continue
 
-                # LOGICA ASSEGNAZIONE NOME PORTO / SEADAY
                 if i == 0:
                     port_of_call = dep_port_name
                 elif i == len(unique_dates) - 1:
@@ -322,7 +318,6 @@ else:
                 else:
                     port_of_call = "Seaday"
 
-                # Waypoint per Alba (07:00) e Tramonto (18:00)
                 target_7am = pd.Timestamp.combine(d, datetime.time(7, 0))
                 day_df['diff_7am'] = (day_df['Arrival Time (Local)'] - target_7am).abs()
                 wp_7am = day_df.loc[day_df['diff_7am'].idxmin()]
@@ -374,11 +369,90 @@ else:
                 mime="text/csv"
             )
 
-        st.subheader("🗺️ Mappa Interattiva delle Rotte")
-        combined_points = pd.concat([df.dropna(subset=['Lat_Decimal', 'Lon_Decimal']) for df in all_route_dfs])
-        if not combined_points.empty:
-            m = folium.Map(location=[combined_points['Lat_Decimal'].mean(), combined_points['Lon_Decimal'].mean()], zoom_start=4)
-            for df_inst in all_route_dfs:
-                pts = list(zip(df_inst['Lat_Decimal'], df_inst['Lon_Decimal']))
-                folium.PolyLine(pts, color="blue", weight=3, opacity=0.7).add_to(m)
-            st_folium(m, width=900, height=450)
+        # ----------------------------------------------------
+        # MAPPA INTERATTIVA (PyDeck Nativa / Folium)
+        # ----------------------------------------------------
+        st.subheader("🗺️ Mappa Interattiva della Rotta Navale")
+
+        map_engine = st.radio(
+            "Seleziona il motore di visualizzazione della mappa:",
+            ["Mappa Nativa Streamlit (PyDeck - Consigliata)", "Mappa Marittima Folium (Esri Ocean)"],
+            horizontal=True
+        )
+
+        all_points = []
+        lines_data = []
+
+        for df_inst in all_route_dfs:
+            valid_pts = df_inst.dropna(subset=['Lat_Decimal', 'Lon_Decimal'])
+            if not valid_pts.empty:
+                coords = valid_pts[['Lon_Decimal', 'Lat_Decimal']].values.tolist()
+                lines_data.append({"path": coords})
+                for _, r in valid_pts.iterrows():
+                    all_points.append({
+                        'lat': r['Lat_Decimal'],
+                        'lon': r['Lon_Decimal'],
+                        'time': str(r['Arrival Time (Local)'])
+                    })
+
+        df_pts = pd.DataFrame(all_points)
+
+        if not df_pts.empty:
+            avg_lat = df_pts['lat'].mean()
+            avg_lon = df_pts['lon'].mean()
+
+            if "PyDeck" in map_engine:
+                # MAPPA NATIVA PYDECK (Esente da problemi di iframe/schermata bianca)
+                view_state = pdk.ViewState(
+                    latitude=avg_lat,
+                    longitude=avg_lon,
+                    zoom=4,
+                    pitch=20
+                )
+
+                line_layer = pdk.Layer(
+                    "PathLayer",
+                    lines_data,
+                    get_path="path",
+                    get_color=[31, 78, 120, 255],
+                    width_scale=20,
+                    width_min_pixels=3,
+                    pickable=True
+                )
+
+                point_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    df_pts,
+                    get_position=["lon", "lat"],
+                    get_color=[230, 50, 50, 200],
+                    get_radius=5000,
+                    radius_min_pixels=4,
+                    pickable=True
+                )
+
+                r_map = pdk.Deck(
+                    layers=[line_layer, point_layer],
+                    initial_view_state=view_state,
+                    map_style="mapbox://styles/mapbox/navigation-day-v1",
+                    tooltip={"text": "Posizione: {lat}, {lon}\nOrario: {time}"}
+                )
+                st.pydeck_chart(r_map)
+
+            else:
+                # MAPPA FOLIUM CON TILE OCEANICHE ESRI (Evita blocchi CORS di OSM)
+                esri_ocean_tiles = "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
+                esri_attr = "Esri, GEBCO, NOAA, CHS, National Geographic"
+
+                m = folium.Map(
+                    location=[avg_lat, avg_lon],
+                    zoom_start=4,
+                    tiles=esri_ocean_tiles,
+                    attr=esri_attr
+                )
+
+                for df_inst in all_route_dfs:
+                    pts = list(zip(df_inst['Lat_Decimal'], df_inst['Lon_Decimal']))
+                    folium.PolyLine(pts, color="#1F4E78", weight=4, opacity=0.85).add_to(m)
+
+                # returned_objects=[] evita che la pagina si ricarichi ad ogni interazione
+                st_folium(m, width=900, height=500, returned_objects=[])
