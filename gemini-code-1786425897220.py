@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Automatic Route Mapper")
 st.write(
-    "Accoppiamento rigido di sequenza: la rotta viene applicata SOLO se l'origine e la destinazione rispettano la sequenza esatta e i giorni sul calendario."
+    "Strict Sequence Matching: The route is applied ONLY if the origin and destination match the exact sequence and dates on the calendar."
 )
 
 # -----------------------------------------------------------------------------
@@ -21,7 +21,7 @@ st.write(
 # -----------------------------------------------------------------------------
 
 def parse_coordinate(coord):
-    """Converte coordinate nautiche o decimali in float."""
+    """Converts nautical or decimal coordinates to float."""
     if pd.isna(coord):
         return 0.0
     if isinstance(coord, (int, float)):
@@ -56,7 +56,7 @@ def parse_coordinate(coord):
 
 
 def parse_tz_offset(tz_val):
-    """Estrae l'offset orario numerico dal CSV."""
+    """Extracts numeric time offset from CSV."""
     if pd.isna(tz_val):
         return 0.0
     s = str(tz_val).strip()
@@ -83,7 +83,7 @@ def parse_tz_offset(tz_val):
 
 
 def format_tz_string(tz_val, offset_hours):
-    """Formatta la Time Zone (es. '7 W' o '2 E')."""
+    """Formats Time Zone string (e.g., '7 W' or '2 E')."""
     s = str(tz_val).strip()
     if not s or s.lower() in ["nan", "none"]:
         return "0"
@@ -102,7 +102,7 @@ def format_tz_string(tz_val, offset_hours):
 
 
 def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
-    """Calcola alba e tramonto in ora locale."""
+    """Calculates sunrise and sunset in local time."""
     try:
         day_of_year = date_obj.timetuple().tm_yday
         declination = 0.409 * math.sin((2 * math.pi / 365) * (day_of_year - 81))
@@ -114,9 +114,9 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
         ) / (math.cos(lat_rad) * math.cos(declination))
 
         if cos_ha >= 1:
-            return "Mai sorge", "Mai sorge"
+            return "Never rises", "Never rises"
         if cos_ha <= -1:
-            return "Mai tramonta", "Mai tramonta"
+            return "Never sets", "Never sets"
 
         ha = math.degrees(math.acos(cos_ha))
         b = (2 * math.pi / 365) * (day_of_year - 81)
@@ -140,7 +140,7 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
             sunset_local_hours
         )
     except Exception:
-        return "N/D", "N/D"
+        return "N/A", "N/A"
 
 
 def clean_text_val(val):
@@ -153,15 +153,15 @@ def clean_text_val(val):
 
 
 def export_styled_excel(df_out: pd.DataFrame) -> bytes:
-    """Genera il file Excel con formattazione grafica personalizzata."""
+    """Generates styled Excel file with custom formatting."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Schedule"
 
-    # Mostra sempre le linee della griglia
+    # Always show grid lines
     ws.views.sheetView[0].showGridLines = True
 
-    # --- STILI GRAFICI ---
+    # --- GRAPHICAL STYLES ---
     font_header = Font(name="Calibri", size=11, bold=True, color="1F4E79")
     font_date = Font(name="Calibri", size=11, bold=True, color="1F4E79")
     font_body = Font(name="Calibri", size=11, bold=True, color="000000")
@@ -179,7 +179,7 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
     border_cell = Border(left=medium_black, right=medium_black, top=thin_black, bottom=thin_black)
     border_header = Border(left=medium_black, right=medium_black, top=medium_black, bottom=medium_black)
 
-    # Scrittura Intestazioni
+    # Write Headers
     headers = ["DATE", "PORT OF CALL", "TIME\nZONE", "SUNRISE", "SUNSET"]
     ws.append(headers)
     ws.row_dimensions[1].height = 28
@@ -191,12 +191,12 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
         cell.alignment = align_center
         cell.border = border_header
 
-    # Scrittura Righe Dati
+    # Write Data Rows
     for row_idx, row in df_out.iterrows():
         current_row = row_idx + 2
 
-        # Formattazione Data (es. 1/Jul/2025)
-        raw_date = row.get("DATA ESECUZIONE", "")
+        # Date formatting (e.g., 1/Jul/2025)
+        raw_date = row.get("DATE", "")
         if isinstance(raw_date, str) and raw_date:
             try:
                 dt_obj = datetime.strptime(raw_date, "%Y-%m-%d")
@@ -208,10 +208,10 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
         else:
             date_str = str(raw_date)
 
-        port_val = str(row.get("WAYPOINT / NOME", ""))
+        port_val = str(row.get("PORT / WAYPOINT", ""))
         tz_val = str(row.get("TIME ZONE", ""))
 
-        # Formattazione Alba/Tramonto (HH:MM)
+        # Sunrise / Sunset formatting (HH:MM)
         def format_time_val(t_val):
             t_str = str(t_val).strip()
             parts = t_str.split(":")
@@ -221,14 +221,14 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
                 return f"{h}:{m}"
             return t_str
 
-        sr_val = format_time_val(row.get("ALBA (Local Time)", ""))
-        ss_val = format_time_val(row.get("TRAMONTO (Local Time)", ""))
+        sr_val = format_time_val(row.get("SUNRISE (Local Time)", ""))
+        ss_val = format_time_val(row.get("SUNSET (Local Time)", ""))
 
         row_data = [date_str, port_val, tz_val, sr_val, ss_val]
         ws.append(row_data)
         ws.row_dimensions[current_row].height = 20
 
-        # Selezione Colore Sfondo
+        # Background color selection
         port_lower = port_val.lower()
         if "sea" in port_lower or "fun day" in port_lower:
             row_fill = fill_sea_day
@@ -237,7 +237,7 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
         else:
             row_fill = fill_white
 
-        # Applicazione stili cella per cella
+        # Apply cell styling
         for col_idx in range(1, 6):
             cell = ws.cell(row=current_row, column=col_idx)
             cell.alignment = align_center
@@ -245,7 +245,7 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
             cell.fill = row_fill
             cell.font = font_date if col_idx == 1 else font_body
 
-    # Larghezza colonne
+    # Column widths
     col_widths = {"A": 16, "B": 32, "C": 12, "D": 12, "E": 12}
     for col_letter, width in col_widths.items():
         ws.column_dimensions[col_letter].width = width
@@ -256,21 +256,21 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
 
 
 # -----------------------------------------------------------------------------
-# SIDEBAR - CARICAMENTO FILE
+# SIDEBAR - FILE UPLOAD
 # -----------------------------------------------------------------------------
-st.sidebar.header("📁 Caricamento Dati")
+st.sidebar.header("📁 Data Upload")
 
 cal_file = st.sidebar.file_uploader(
-    "1. Carica Calendario Mensile (Excel)", type=["xlsx", "xls"]
+    "1. Upload Monthly Calendar (Excel)", type=["xlsx", "xls"]
 )
 route_files = st.sidebar.file_uploader(
-    "2. Carica File Rotta (CSV)", type=["csv"], accept_multiple_files=True
+    "2. Upload Route Files (CSV)", type=["csv"], accept_multiple_files=True
 )
 
 if cal_file and route_files:
     df_cal = pd.read_excel(cal_file)
 
-    # Identificazione colonne Calendario
+    # Identify Calendar columns
     cal_date_col = next(
         (c for c in df_cal.columns if "date" in c.lower() or "data" in c.lower()),
         df_cal.columns[0],
@@ -296,10 +296,10 @@ if cal_file and route_files:
         else ""
     )
 
-    # Ordina il calendario per data
+    # Sort calendar by date
     df_cal = df_cal.sort_values(by="Date_Parsed").reset_index(drop=True)
 
-    st.subheader("🔍 Analisi Sequenziale della Rotta")
+    st.subheader("🔍 Sequential Route Analysis")
 
     results = []
 
@@ -335,10 +335,10 @@ if cal_file and route_files:
                 lambda d: (d - min_date).days if pd.notnull(d) else 0
             )
 
-            # Durata in giorni della rotta CSV (es. da giorno 0 a giorno 3 = 3 giorni di differenza)
+            # Route duration in days
             route_duration_days = int(df_r["rel_day"].max() - df_r["rel_day"].min())
 
-            # ESTRAZIONE CODICI/NOMI ORIGINE E DESTINAZIONE
+            # EXTRACT ORIGIN & DESTINATION CODES/NAMES
             filename_port_codes = re.findall(r"\b[A-Z]{3}\b", rf.name.upper())
 
             start_code = filename_port_codes[0] if len(filename_port_codes) >= 1 else ""
@@ -351,19 +351,19 @@ if cal_file and route_files:
             end_name_csv = clean_text_val(end_wp[name_col]).upper() if name_col else ""
 
             st.write(
-                f"📄 **Rotta CSV:** `{rf.name}` | "
-                f"**Origine:** `{start_code or start_name_csv}` $\\rightarrow$ **Destinazione:** `{end_code or end_name_csv}` | "
-                f"**Durata Rotta:** {route_duration_days + 1} giorni"
+                f"📄 **Route CSV:** `{rf.name}` | "
+                f"**Origin:** `{start_code or start_name_csv}` $\\rightarrow$ **Destination:** `{end_code or end_name_csv}` | "
+                f"**Route Duration:** {route_duration_days + 1} days"
             )
 
-            # SEARCH SEQUENZIALE SUL CALENDARIO
+            # SEQUENTIAL CALENDAR SEARCH
             matched_sequence_dates = []
 
             for i in range(len(df_cal)):
                 row_start = df_cal.iloc[i]
                 date_start = row_start["Date_Parsed"]
 
-                # Verifica se questa riga del calendario corrisponde al porto di Partenza
+                # Check if calendar row matches departure port
                 start_match = (
                     (start_code and start_code == row_start["Port_Code_Clean"])
                     or (start_code and start_code in row_start["Location_Clean"])
@@ -373,7 +373,7 @@ if cal_file and route_files:
                 if start_match:
                     target_end_date = date_start + timedelta(days=route_duration_days)
 
-                    # Cerca se nel calendario existe una riga con la data esatta di arrivo e il porto di Destinazione
+                    # Search calendar for matching arrival date and destination port
                     matching_end_rows = df_cal[df_cal["Date_Parsed"] == target_end_date]
 
                     for _, row_end in matching_end_rows.iterrows():
@@ -392,11 +392,11 @@ if cal_file and route_files:
                             matched_sequence_dates.append((cruise_id, date_start))
 
             if matched_sequence_dates:
-                st.success(f"✅ Sequenza trovata nel calendario per le date: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}")
+                st.success(f"✅ Matching sequence found in calendar for dates: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}")
             else:
-                st.warning("⚠️ Nessuna sequenza di date esatta trovata nel calendario per questo itinerario.")
+                st.warning("⚠️ No exact date sequence found in calendar for this itinerary.")
 
-            # GENERAZIONE EFFEMERIDI SOLO PER LE SEQUENZE CONVALIDATE
+            # GENERATE EPHEMERIS ONLY FOR VALIDATED SEQUENCES
             for c_code, start_date in matched_sequence_dates:
                 for rel_day, day_group in df_r.groupby("rel_day"):
                     actual_date = start_date + timedelta(days=int(rel_day))
@@ -405,7 +405,7 @@ if cal_file and route_files:
                     lat = parse_coordinate(mid_point[lat_col])
                     lon = parse_coordinate(mid_point[lon_col])
 
-                    # RECUPERA IL NOME DEL PORTO/GIORNO DAL CALENDARIO ORIGINALE
+                    # RETRIEVE PORT/DAY NAME FROM ORIGINAL CALENDAR
                     cal_row_match = df_cal[df_cal["Date_Parsed"] == actual_date]
                     if not cal_row_match.empty:
                         port_day_name = clean_text_val(cal_row_match.iloc[0][cal_port_col])
@@ -413,7 +413,7 @@ if cal_file and route_files:
                         port_day_name = clean_text_val(mid_point[name_col]) if name_col else ""
 
                     if not port_day_name:
-                        port_day_name = f"Giorno {rel_day + 1}"
+                        port_day_name = f"Day {rel_day + 1}"
 
                     tz_raw = mid_point[tz_col] if tz_col else "0"
                     tz_offset = parse_tz_offset(tz_raw)
@@ -424,41 +424,41 @@ if cal_file and route_files:
                     )
 
                     results.append({
-                        "CODICE CROCIERA": c_code,
-                        "DATA ESECUZIONE": actual_date.strftime("%Y-%m-%d"),
-                        "GIORNO ROTTA": f"Giorno {rel_day + 1}",
-                        "WAYPOINT / NOME": port_day_name,
-                        "LATITUDINE": lat,
-                        "LONGITUDINE": lon,
+                        "CRUISE CODE": c_code,
+                        "DATE": actual_date.strftime("%Y-%m-%d"),
+                        "ROUTE DAY": f"Day {rel_day + 1}",
+                        "PORT / WAYPOINT": port_day_name,
+                        "LATITUDE": lat,
+                        "LONGITUDE": lon,
                         "TIME ZONE": tz_str_formatted,
-                        "ALBA (Local Time)": sunrise,
-                        "TRAMONTO (Local Time)": sunset,
-                        "FILE ROTTA ORIGINE": rf.name,
+                        "SUNRISE (Local Time)": sunrise,
+                        "SUNSET (Local Time)": sunset,
+                        "ORIGIN ROUTE FILE": rf.name,
                     })
 
         except Exception as e:
-            st.error(f"Errore durante l'elaborazione di {rf.name}: {e}")
+            st.error(f"Error processing {rf.name}: {e}")
 
     # -----------------------------------------------------------------------------
-    # TABELLA FINALE ED EXPORT EXCEL
+    # FINAL TABLE AND EXCEL EXPORT
     # -----------------------------------------------------------------------------
     if results:
         df_out = pd.DataFrame(results)
-        df_out = df_out.drop_duplicates(subset=["CODICE CROCIERA", "DATA ESECUZIONE", "WAYPOINT / NOME"])
-        df_out = df_out.sort_values(by=["DATA ESECUZIONE", "CODICE CROCIERA"])
+        df_out = df_out.drop_duplicates(subset=["CRUISE CODE", "DATE", "PORT / WAYPOINT"])
+        df_out = df_out.sort_values(by=["DATE", "CRUISE CODE"])
 
         st.markdown("---")
-        st.subheader("📊 Risultati Calcolo Effemeridi Automatica")
+        st.subheader("📊 Automatic Ephemeris Calculation Results")
         st.dataframe(df_out, use_container_width=True)
 
-        # Genera il file Excel formattato con lo stile personalizzato
+        # Generate styled Excel file
         excel_data = export_styled_excel(df_out)
 
         st.download_button(
-            label="📥 Scarica Report Excel Completato",
+            label="📥 Download Complete Excel Report",
             data=excel_data,
             file_name=f'Naval_Ephemeris_{datetime.now().strftime("%Y%m%d")}.xlsx',
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 else:
-    st.info("Carica il calendario Excel e i file CSV di rotta per avviare il riconoscimento automatico.")
+    st.info("Please upload the Excel calendar and route CSV files to start automatic mapping.")
