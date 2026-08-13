@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 st.set_page_config(
     page_title="Naval Ephemeris & Automatic Route Mapper", layout="wide"
@@ -150,6 +152,109 @@ def clean_text_val(val):
     return s
 
 
+def export_styled_excel(df_out: pd.DataFrame) -> bytes:
+    """Genera il file Excel con formattazione grafica personalizzata."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Schedule"
+
+    # Mostra sempre le linee della griglia
+    ws.views.sheetView[0].showGridLines = True
+
+    # --- STILI GRAFICI ---
+    font_header = Font(name="Calibri", size=11, bold=True, color="1F4E79")
+    font_date = Font(name="Calibri", size=11, bold=True, color="1F4E79")
+    font_body = Font(name="Calibri", size=11, bold=True, color="000000")
+
+    fill_header = PatternFill(start_color="D0CECE", end_color="D0CECE", fill_type="solid")
+    fill_sea_day = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    fill_long_beach = PatternFill(start_color="A9D08E", end_color="A9D08E", fill_type="solid")
+    fill_white = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    thin_black = Side(border_style="thin", color="000000")
+    medium_black = Side(border_style="medium", color="000000")
+
+    border_cell = Border(left=medium_black, right=medium_black, top=thin_black, bottom=thin_black)
+    border_header = Border(left=medium_black, right=medium_black, top=medium_black, bottom=medium_black)
+
+    # Scrittura Intestazioni
+    headers = ["DATE", "PORT OF CALL", "TIME\nZONE", "SUNRISE", "SUNSET"]
+    ws.append(headers)
+    ws.row_dimensions[1].height = 28
+
+    for col_idx in range(1, 6):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = font_header
+        cell.fill = fill_header
+        cell.alignment = align_center
+        cell.border = border_header
+
+    # Scrittura Righe Dati
+    for row_idx, row in df_out.iterrows():
+        current_row = row_idx + 2
+
+        # Formattazione Data (es. 1/Jul/2025)
+        raw_date = row.get("DATA ESECUZIONE", "")
+        if isinstance(raw_date, str) and raw_date:
+            try:
+                dt_obj = datetime.strptime(raw_date, "%Y-%m-%d")
+                date_str = f"{dt_obj.day}/{dt_obj.strftime('%b')}/{dt_obj.year}"
+            except ValueError:
+                date_str = str(raw_date)
+        elif isinstance(raw_date, (datetime, pd.Timestamp)):
+            date_str = f"{raw_date.day}/{raw_date.strftime('%b')}/{raw_date.year}"
+        else:
+            date_str = str(raw_date)
+
+        port_val = str(row.get("WAYPOINT / NOME", ""))
+        tz_val = str(row.get("TIME ZONE", ""))
+
+        # Formattazione Alba/Tramonto (HH:MM)
+        def format_time_val(t_val):
+            t_str = str(t_val).strip()
+            parts = t_str.split(":")
+            if len(parts) >= 2:
+                h = int(parts[0])
+                m = parts[1]
+                return f"{h}:{m}"
+            return t_str
+
+        sr_val = format_time_val(row.get("ALBA (Local Time)", ""))
+        ss_val = format_time_val(row.get("TRAMONTO (Local Time)", ""))
+
+        row_data = [date_str, port_val, tz_val, sr_val, ss_val]
+        ws.append(row_data)
+        ws.row_dimensions[current_row].height = 20
+
+        # Selezione Colore Sfondo
+        port_lower = port_val.lower()
+        if "sea" in port_lower or "fun day" in port_lower:
+            row_fill = fill_sea_day
+        elif "long beach" in port_lower:
+            row_fill = fill_long_beach
+        else:
+            row_fill = fill_white
+
+        # Applicazione stili cella per cella
+        for col_idx in range(1, 6):
+            cell = ws.cell(row=current_row, column=col_idx)
+            cell.alignment = align_center
+            cell.border = border_cell
+            cell.fill = row_fill
+            cell.font = font_date if col_idx == 1 else font_body
+
+    # Larghezza colonne
+    col_widths = {"A": 16, "B": 32, "C": 12, "D": 12, "E": 12}
+    for col_letter, width in col_widths.items():
+        ws.column_dimensions[col_letter].width = width
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
 # -----------------------------------------------------------------------------
 # SIDEBAR - CARICAMENTO FILE
 # -----------------------------------------------------------------------------
@@ -252,7 +357,6 @@ if cal_file and route_files:
             )
 
             # SEARCH SEQUENZIALE SUL CALENDARIO
-            # Cerca nel calendario una data D (Origine) e una data D + route_duration_days (Destinazione)
             matched_sequence_dates = []
 
             for i in range(len(df_cal)):
@@ -341,10 +445,8 @@ if cal_file and route_files:
         st.subheader("📊 Risultati Calcolo Effemeridi Automatica")
         st.dataframe(df_out, use_container_width=True)
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_out.to_excel(writer, index=False, sheet_name="Ephemeris")
-        excel_data = output.getvalue()
+        # Genera il file Excel formattato con lo stile personalizzato
+        excel_data = export_styled_excel(df_out)
 
         st.download_button(
             label="📥 Scarica Report Excel Completato",
