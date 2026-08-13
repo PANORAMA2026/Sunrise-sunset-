@@ -4,7 +4,6 @@ import re
 from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
-from geopy.geocoders import Nominatim
 
 st.set_page_config(
     page_title="Naval Ephemeris & Automatic Route Mapper", layout="wide"
@@ -12,34 +11,12 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Automatic Route Mapper")
 st.write(
-    "Riconoscimento automatico delle rotte tramite Codici Porto (es. LGB, PVR), nomi dei waypoint e coordinate geografiche."
+    "Accoppiamento rigido di sequenza: la rotta viene applicata SOLO se l'origine e la destinazione rispettano la sequenza esatta e i giorni sul calendario."
 )
 
 # -----------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 # -----------------------------------------------------------------------------
-
-@st.cache_data(ttl=86400)
-def reverse_geocode_port(lat, lon):
-    """Mappatura di riserva via coordinate se i codici porto non sono presenti."""
-    try:
-        geolocator = Nominatim(user_agent="naval_ephemeris_app_v2")
-        location = geolocator.reverse((lat, lon), language="en", timeout=3)
-        if location and location.raw.get("address"):
-            addr = location.raw["address"]
-            name = (
-                addr.get("city")
-                or addr.get("town")
-                or addr.get("port")
-                or addr.get("county")
-                or addr.get("state")
-                or ""
-            )
-            return name.strip()
-    except Exception:
-        pass
-    return ""
-
 
 def parse_coordinate(coord):
     """Converte coordinate nautiche o decimali in float."""
@@ -165,7 +142,6 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
 
 
 def clean_text_val(val):
-    """Pulisce valori di testo evitando che compaiano 'nan' o numeri di waypoint."""
     if pd.isna(val):
         return ""
     s = str(val).strip()
@@ -208,14 +184,17 @@ if cal_file and route_files:
     )
 
     df_cal["Date_Parsed"] = pd.to_datetime(df_cal[cal_date_col]).dt.date
-    df_cal["Location_Clean"] = df_cal[cal_port_col].astype(str).str.strip()
+    df_cal["Location_Clean"] = df_cal[cal_port_col].astype(str).str.strip().str.upper()
     df_cal["Port_Code_Clean"] = (
         df_cal[cal_code_col].astype(str).str.strip().str.upper()
         if cal_code_col
         else ""
     )
 
-    st.subheader("🔍 Analisi e Mappatura Automatica delle Rotte")
+    # Ordina il calendario per data
+    df_cal = df_cal.sort_values(by="Date_Parsed").reset_index(drop=True)
+
+    st.subheader("🔍 Analisi Sequenziale della Rotta")
 
     results = []
 
@@ -223,14 +202,12 @@ if cal_file and route_files:
         try:
             df_r = pd.read_csv(rf)
 
-            # Riconoscimento colonne corretto (dà priorità a 'Name' e ignora 'Waypoint No.')
             time_col = next(
                 c for c in df_r.columns if "arrival time" in c.lower() or "time" in c
             )
             lat_col = next(c for c in df_r.columns if "lat" in c.lower())
             lon_col = next(c for c in df_r.columns if "lon" in c.lower())
 
-            # Cerca prima colonne con 'name' o 'port' ed esclude esplicitamente 'no'/'number'
             name_cols = [
                 c for c in df_r.columns
                 if any(k in c.lower() for k in ["name", "port", "location"])
@@ -253,62 +230,70 @@ if cal_file and route_files:
                 lambda d: (d - min_date).days if pd.notnull(d) else 0
             )
 
-            # 1. ESTRAZIONE CODICI PORTO DAL NOME FILE (es. LGB-PVR)
+            # Durata in giorni della rotta CSV (es. da giorno 0 a giorno 3 = 3 giorni di differenza)
+            route_duration_days = int(df_r["rel_day"].max() - df_r["rel_day"].min())
+
+            # ESTRAZIONE CODICI/NOMI ORIGINE E DESTINAZIONE
             filename_port_codes = re.findall(r"\b[A-Z]{3}\b", rf.name.upper())
 
             start_code = filename_port_codes[0] if len(filename_port_codes) >= 1 else ""
             end_code = filename_port_codes[1] if len(filename_port_codes) >= 2 else ""
 
-            # 2. ESTRAZIONE NOMI DAI WAYPOINT
             start_wp = df_r.iloc[0]
             end_wp = df_r.iloc[-1]
 
-            start_name_csv = clean_text_val(start_wp[name_col]) if name_col else ""
-            end_name_csv = clean_text_val(end_wp[name_col]) if name_col else ""
-
-            # 3. REVERSE GEOCODING DI RISERVA SE MANCANO NOMI E CODICI
-            start_lat, start_lon = parse_coordinate(start_wp[lat_col]), parse_coordinate(start_wp[lon_col])
-            end_lat, end_lon = parse_coordinate(end_wp[lat_col]), parse_coordinate(end_wp[lon_col])
-
-            start_geo = start_code or start_name_csv or reverse_geocode_port(start_lat, start_lon) or "Origine"
-            end_geo = end_code or end_name_csv or reverse_geocode_port(end_lat, end_lon) or "Destinazione"
+            start_name_csv = clean_text_val(start_wp[name_col]).upper() if name_col else ""
+            end_name_csv = clean_text_val(end_wp[name_col]).upper() if name_col else ""
 
             st.write(
-                f"📄 **Rotta CSV:** `{rf.name}`  \n"
-                f"📍 *Origine Riconosciuta:* **{start_geo.upper()}** | "
-                f"📍 *Destinazione Riconosciuta:* **{end_geo.upper()}**"
+                f"📄 **Rotta CSV:** `{rf.name}` | "
+                f"**Origine:** `{start_code or start_name_csv}` $\\rightarrow$ **Destinazione:** `{end_code or end_name_csv}` | "
+                f"**Durata Rotta:** {route_duration_days + 1} giorni"
             )
 
-            # 4. RICERCA AUTOMATICA NEL CALENDARIO EXCEL
-            matching_cruises = []
+            # SEARCH SEQUENZIALE SUL CALENDARIO
+            # Cerca nel calendario una data D (Origine) e una data D + route_duration_days (Destinazione)
+            matched_sequence_dates = []
 
-            if cal_cruise_col:
-                for cruise_id, group in df_cal.groupby(cal_cruise_col):
-                    ports_in_cruise = group["Location_Clean"].str.upper().tolist()
-                    codes_in_cruise = group["Port_Code_Clean"].tolist()
+            for i in range(len(df_cal)):
+                row_start = df_cal.iloc[i]
+                date_start = row_start["Date_Parsed"]
 
-                    # Verifica corrispondenza per Codice Porto (LGB, PVR) o per Nome Citta
-                    start_matched = (
-                        (start_code and start_code in codes_in_cruise)
-                        or any(start_geo.upper() in p for p in ports_in_cruise if len(start_geo) > 2)
-                    )
-                    end_matched = (
-                        (end_code and end_code in codes_in_cruise)
-                        or any(end_geo.upper() in p for p in ports_in_cruise if len(end_geo) > 2)
-                    )
+                # Verifica se questa riga del calendario corrisponde al porto di Partenza
+                start_match = (
+                    (start_code and start_code == row_start["Port_Code_Clean"])
+                    or (start_code and start_code in row_start["Location_Clean"])
+                    or (start_name_csv and start_name_csv in row_start["Location_Clean"])
+                )
 
-                    if start_matched or end_matched:
-                        start_date = group["Date_Parsed"].min()
-                        matching_cruises.append((str(cruise_id), start_date))
+                if start_match:
+                    target_end_date = date_start + timedelta(days=route_duration_days)
 
-            # Se la ricerca automatica non ha vincoli di codice crociera, prende le date di partenza
-            if not matching_cruises:
-                unique_start_dates = sorted(df_cal["Date_Parsed"].unique())
-                for idx, d in enumerate(unique_start_dates):
-                    matching_cruises.append((f"Crociera_{idx+1}", d))
+                    # Cerca se nel calendario esiste una riga con la data esatta di arrivo e il porto di Destinazione
+                    matching_end_rows = df_cal[df_cal["Date_Parsed"] == target_end_date]
 
-            # 5. GENERAZIONE EFFEMERIDI
-            for c_code, start_date in matching_cruises:
+                    for _, row_end in matching_end_rows.iterrows():
+                        end_match = (
+                            (end_code and end_code == row_end["Port_Code_Clean"])
+                            or (end_code and end_code in row_end["Location_Clean"])
+                            or (end_name_csv and end_name_csv in row_end["Location_Clean"])
+                        )
+
+                        if end_match:
+                            cruise_id = (
+                                str(row_start[cal_cruise_col])
+                                if cal_cruise_col and pd.notna(row_start[cal_cruise_col])
+                                else f"PTP_{date_start}"
+                            )
+                            matched_sequence_dates.append((cruise_id, date_start))
+
+            if matched_sequence_dates:
+                st.success(f"✅ Sequenza trovata nel calendario per le date: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}")
+            else:
+                st.warning("⚠️ Nessuna sequenza di date esatta trovata nel calendario per questo itinerario.")
+
+            # GENERAZIONE EFFEMERIDI SOLO PER LE SEQUENZE CONVALIDATE
+            for c_code, start_date in matched_sequence_dates:
                 for rel_day, day_group in df_r.groupby("rel_day"):
                     actual_date = start_date + timedelta(days=int(rel_day))
                     mid_point = day_group.iloc[len(day_group) // 2]
