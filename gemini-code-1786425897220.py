@@ -373,7 +373,7 @@ if cal_file and route_files:
                 if start_match:
                     target_end_date = date_start + timedelta(days=route_duration_days)
 
-                    # Cerca se nel calendario esiste una riga con la data esatta di arrivo e il porto di Destinazione
+                    # Cerca se nel calendario existe una riga con la data esatta di arrivo e il porto di Destinazione
                     matching_end_rows = df_cal[df_cal["Date_Parsed"] == target_end_date]
 
                     for _, row_end in matching_end_rows.iterrows():
@@ -405,9 +405,15 @@ if cal_file and route_files:
                     lat = parse_coordinate(mid_point[lat_col])
                     lon = parse_coordinate(mid_point[lon_col])
 
-                    wp_name = clean_text_val(mid_point[name_col]) if name_col else ""
-                    if not wp_name:
-                        wp_name = f"Waypoint Giorno {rel_day + 1}"
+                    # RECUPERA IL NOME DEL PORTO/GIORNO DAL CALENDARIO ORIGINALE
+                    cal_row_match = df_cal[df_cal["Date_Parsed"] == actual_date]
+                    if not cal_row_match.empty:
+                        port_day_name = clean_text_val(cal_row_match.iloc[0][cal_port_col])
+                    else:
+                        port_day_name = clean_text_val(mid_point[name_col]) if name_col else ""
+
+                    if not port_day_name:
+                        port_day_name = f"Giorno {rel_day + 1}"
 
                     tz_raw = mid_point[tz_col] if tz_col else "0"
                     tz_offset = parse_tz_offset(tz_raw)
@@ -421,7 +427,7 @@ if cal_file and route_files:
                         "CODICE CROCIERA": c_code,
                         "DATA ESECUZIONE": actual_date.strftime("%Y-%m-%d"),
                         "GIORNO ROTTA": f"Giorno {rel_day + 1}",
-                        "WAYPOINT / NOME": wp_name,
+                        "WAYPOINT / NOME": port_day_name,
                         "LATITUDINE": lat,
                         "LONGITUDINE": lon,
                         "TIME ZONE": tz_str_formatted,
