@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 import io
 import math
 import re
@@ -153,6 +153,13 @@ def clean_text_val(val):
     if s.lower() in ["nan", "none", "null"]:
         return ""
     return s
+
+
+def interpolate_lat_lon(lat1, lon1, lat2, lon2, ratio):
+    """Interpolazione lineare tra due punti geografici."""
+    lat = lat1 + ratio * (lat2 - lat1)
+    lon = lon1 + ratio * (lon2 - lon1)
+    return lat, lon
 
 
 def export_styled_excel(df_out: pd.DataFrame) -> bytes:
@@ -330,7 +337,7 @@ if cal_file and route_files:
 
     st.subheader("🔍 Sequential Route Analysis")
 
-    results = []
+    results_from_routes = []
 
     for rf in route_files:
         try:
@@ -480,62 +487,18 @@ if cal_file and route_files:
 
             if matched_sequence_dates:
                 st.success(
-                    f"✅ Matching sequence found in calendar for dates: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}"
-                )
-            else:
-                st.info(
-                    f"ℹ️ Route `{rf.name}` is not scheduled in the uploaded calendar month. Skipping gracefully without errors."
+                    f"✅ Matching sequence found for dates: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}"
                 )
 
-            # GENERATE EPHEMERIS CONTINUOUSLY (GIORNI SEQUENZIALI SENZA SALTI)
             for c_code, start_date in matched_sequence_dates:
-                last_known_lat = parse_coordinate(df_r.iloc[0][lat_col])
-                last_known_lon = parse_coordinate(df_r.iloc[0][lon_col])
-                last_known_tz = df_r.iloc[0][tz_col] if tz_col else "0"
+                for rel_day, day_group in df_r.groupby("rel_day"):
+                    actual_date = start_date + timedelta(days=int(rel_day))
+                    mid_point = day_group.iloc[len(day_group) // 2]
 
-                for rel_day in range(route_duration_days + 1):
-                    actual_date = start_date + timedelta(days=rel_day)
-                    day_group = df_r[df_r["rel_day"] == rel_day]
+                    lat = parse_coordinate(mid_point[lat_col])
+                    lon = parse_coordinate(mid_point[lon_col])
 
-                    if not day_group.empty:
-                        mid_point = day_group.iloc[len(day_group) // 2]
-                        lat = parse_coordinate(mid_point[lat_col])
-                        lon = parse_coordinate(mid_point[lon_col])
-                        tz_raw = mid_point[tz_col] if tz_col else last_known_tz
-
-                        last_known_lat, last_known_lon, last_known_tz = (
-                            lat,
-                            lon,
-                            tz_raw,
-                        )
-                    else:
-                        # Se nel CSV mancano WP per quel giorno, usa le ultime coordinate note
-                        lat, lon, tz_raw = (
-                            last_known_lat,
-                            last_known_lon,
-                            last_known_tz,
-                        )
-
-                    # Recupera il nome dal calendario
-                    cal_row_match = df_cal[
-                        df_cal["Date_Parsed"] == actual_date
-                    ]
-                    if not cal_row_match.empty:
-                        port_day_name = clean_text_val(
-                            cal_row_match.iloc[0][cal_port_col]
-                        )
-                    elif not day_group.empty:
-                        port_day_name = (
-                            clean_text_val(mid_point[name_col])
-                            if name_col
-                            else f"Day {rel_day + 1}"
-                        )
-                    else:
-                        port_day_name = '"Fun Day" at Sea'
-
-                    if not port_day_name:
-                        port_day_name = f"Day {rel_day + 1}"
-
+                    tz_raw = mid_point[tz_col] if tz_col else "0"
                     tz_offset = parse_tz_offset(tz_raw)
                     tz_str_formatted = format_tz_string(tz_raw, tz_offset)
 
@@ -543,34 +506,171 @@ if cal_file and route_files:
                         lat, lon, actual_date, tz_offset
                     )
 
-                    results.append({
+                    results_from_routes.append({
                         "CRUISE CODE": c_code,
                         "DATE": actual_date.strftime("%Y-%m-%d"),
-                        "ROUTE DAY": f"Day {rel_day + 1}",
-                        "PORT / WAYPOINT": port_day_name,
+                        "DATE_OBJ": actual_date,
                         "LATITUDE": lat,
                         "LONGITUDE": lon,
                         "TIME ZONE": tz_str_formatted,
+                        "TZ_OFFSET": tz_offset,
                         "SUNRISE (Local Time)": sunrise,
                         "SUNSET (Local Time)": sunset,
-                        "ORIGIN ROUTE FILE": rf.name,
+                        "DT_PARSED": mid_point["dt_parsed"],
                     })
 
         except Exception as e:
             st.warning(f"⚠️ Could not process file `{rf.name}`: {e}")
 
     # -----------------------------------------------------------------------------
-    # FINAL TABLE AND EXCEL EXPORT
+    # MASTER CALENDAR FILL & INTERPOLATION LOGIC
     # -----------------------------------------------------------------------------
-    if results:
-        df_out = pd.DataFrame(results)
-        # Rimuove duplicati basandosi su Data e Crociera per evitare doppi porti finali
-        df_out = df_out.drop_duplicates(
-            subset=["CRUISE CODE", "DATE"], keep="first"
+    if not df_cal.empty:
+        df_routes = (
+            pd.DataFrame(results_from_routes)
+            if results_from_routes
+            else pd.DataFrame()
         )
-        df_out = df_out.sort_values(by=["DATE", "CRUISE CODE"]).reset_index(
-            drop=True
-        )
+
+        final_rows = []
+
+        for idx, cal_row in df_cal.iterrows():
+            c_date = cal_row["Date_Parsed"]
+            date_str = c_date.strftime("%Y-%m-%d")
+            port_name = clean_text_val(cal_row[cal_port_col])
+            cruise_id = (
+                str(cal_row[cal_cruise_col])
+                if cal_cruise_col and pd.notna(cal_row[cal_cruise_col])
+                else "CRUISE"
+            )
+
+            # Cerca se la data è presente nei waypoint gestiti dai CSV
+            matched_res = None
+            if not df_routes.empty and "DATE" in df_routes.columns:
+                match_df = df_routes[df_routes["DATE"] == date_str]
+                if not match_df.empty:
+                    matched_res = match_df.iloc[0].to_dict()
+
+            if matched_res:
+                final_rows.append({
+                    "CRUISE CODE": cruise_id,
+                    "DATE": date_str,
+                    "PORT / WAYPOINT": port_name,
+                    "LATITUDE": matched_res["LATITUDE"],
+                    "LONGITUDE": matched_res["LONGITUDE"],
+                    "TIME ZONE": matched_res["TIME ZONE"],
+                    "SUNRISE (Local Time)": matched_res["SUNRISE (Local Time)"],
+                    "SUNSET (Local Time)": matched_res["SUNSET (Local Time)"],
+                })
+            else:
+                # LOGICA INTERPOLAZIONE SEA DAYS
+                # Cerca l'ultimo porto/WP noto PRIMA di questa data e il primo DOPO
+                prev_points = [
+                    r for r in final_rows if r.get("LATITUDE") is not None
+                ]
+                next_cal_rows = df_cal.iloc[idx + 1 :]
+
+                # Trova il punto successivo disponibile nel CSV
+                next_match = None
+                if not df_routes.empty:
+                    future_matches = df_routes[df_routes["DATE"] > date_str]
+                    if not future_matches.empty:
+                        next_match = future_matches.iloc[0].to_dict()
+
+                if prev_points and next_match:
+                    p1 = prev_points[-1]
+                    p2 = next_match
+
+                    p1_dt = datetime.strptime(p1["DATE"], "%Y-%m-%d")
+                    p2_dt = datetime.strptime(p2["DATE"], "%Y-%m-%d")
+
+                    total_days = (p2_dt - p1_dt).days
+
+                    if total_days > 1:
+                        # Se è un giorno tra la partenza e la mezzanotte del giorno dopo
+                        day_index = (c_date - p1_dt.date()).days
+
+                        # Calcolo ratio tra Partenza, Mezzanotte e Arrivo
+                        ratio = day_index / total_days
+                        lat, lon = interpolate_lat_lon(
+                            p1["LATITUDE"],
+                            p1["LONGITUDE"],
+                            p2["LATITUDE"],
+                            p2["LONGITUDE"],
+                            ratio,
+                        )
+
+                        tz_offset = p1.get(
+                            "TZ_OFFSET", parse_tz_offset(p1.get("TIME ZONE"))
+                        )
+                        tz_str = format_tz_string(
+                            p1.get("TIME ZONE"), tz_offset
+                        )
+
+                        sr, ss = calculate_sun_events_native(
+                            lat, lon, c_date, tz_offset
+                        )
+
+                        final_rows.append({
+                            "CRUISE CODE": cruise_id,
+                            "DATE": date_str,
+                            "PORT / WAYPOINT": (
+                                port_name if port_name else '"Fun Day" at Sea'
+                            ),
+                            "LATITUDE": lat,
+                            "LONGITUDE": lon,
+                            "TIME ZONE": tz_str,
+                            "SUNRISE (Local Time)": sr,
+                            "SUNSET (Local Time)": ss,
+                        })
+                    else:
+                        # Fallback ultimo punto noto
+                        lat, lon = p1["LATITUDE"], p1["LONGITUDE"]
+                        tz_str = p1["TIME ZONE"]
+                        tz_offset = parse_tz_offset(tz_str)
+                        sr, ss = calculate_sun_events_native(
+                            lat, lon, c_date, tz_offset
+                        )
+
+                        final_rows.append({
+                            "CRUISE CODE": cruise_id,
+                            "DATE": date_str,
+                            "PORT / WAYPOINT": (
+                                port_name if port_name else '"Fun Day" at Sea'
+                            ),
+                            "LATITUDE": lat,
+                            "LONGITUDE": lon,
+                            "TIME ZONE": tz_str,
+                            "SUNRISE (Local Time)": sr,
+                            "SUNSET (Local Time)": ss,
+                        })
+                elif prev_points:
+                    p1 = prev_points[-1]
+                    lat, lon = p1["LATITUDE"], p1["LONGITUDE"]
+                    tz_str = p1["TIME ZONE"]
+                    tz_offset = parse_tz_offset(tz_str)
+                    sr, ss = calculate_sun_events_native(
+                        lat, lon, c_date, tz_offset
+                    )
+
+                    final_rows.append({
+                        "CRUISE CODE": cruise_id,
+                        "DATE": date_str,
+                        "PORT / WAYPOINT": (
+                            port_name if port_name else '"Fun Day" at Sea'
+                        ),
+                        "LATITUDE": lat,
+                        "LONGITUDE": lon,
+                        "TIME ZONE": tz_str,
+                        "SUNRISE (Local Time)": sr,
+                        "SUNSET (Local Time)": ss,
+                    })
+
+        df_out = pd.DataFrame(final_rows)
+
+        # Deduplicazione per singola Data Solare (rimuove il doppio Long Beach sui turnaround days)
+        df_out = df_out.drop_duplicates(subset=["DATE"], keep="first")
+        df_out = df_out.sort_values(by="DATE").reset_index(drop=True)
 
         st.markdown("---")
         st.subheader("📊 Automatic Ephemeris Calculation Results")
