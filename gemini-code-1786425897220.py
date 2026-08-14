@@ -13,7 +13,7 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Automatic Route Mapper")
 st.write(
-    "Strict Sequence Matching: The route is applied ONLY if the origin and destination match the exact sequence and dates on the calendar."
+    "Strict Sequence Matching: The route is applied ONLY if the origin and destination match the exact sequence and dates on the active calendar."
 )
 
 # -----------------------------------------------------------------------------
@@ -308,10 +308,15 @@ if cal_file and route_files:
             df_r = pd.read_csv(rf)
 
             time_col = next(
-                c for c in df_r.columns if "arrival time" in c.lower() or "time" in c
+                (c for c in df_r.columns if "arrival time" in c.lower() or "time" in c.lower()),
+                None
             )
-            lat_col = next(c for c in df_r.columns if "lat" in c.lower())
-            lon_col = next(c for c in df_r.columns if "lon" in c.lower())
+            lat_col = next((c for c in df_r.columns if "lat" in c.lower()), None)
+            lon_col = next((c for c in df_r.columns if "lon" in c.lower()), None)
+
+            if not time_col or not lat_col or not lon_col:
+                st.info(f"ℹ️ File `{rf.name}` skipped: missing required time or coordinate columns.")
+                continue
 
             name_cols = [
                 c for c in df_r.columns
@@ -394,7 +399,8 @@ if cal_file and route_files:
             if matched_sequence_dates:
                 st.success(f"✅ Matching sequence found in calendar for dates: {[d.strftime('%Y-%m-%d') for _, d in matched_sequence_dates]}")
             else:
-                st.warning("⚠️ No exact date sequence found in calendar for this itinerary.")
+                # SAFE HANDLING: Route belongs to a different month/schedule
+                st.info(f"ℹ️ Route `{rf.name}` is not scheduled in the uploaded calendar month. Skipping gracefully without errors.")
 
             # GENERATE EPHEMERIS ONLY FOR VALIDATED SEQUENCES
             for c_code, start_date in matched_sequence_dates:
@@ -437,7 +443,7 @@ if cal_file and route_files:
                     })
 
         except Exception as e:
-            st.error(f"Error processing {rf.name}: {e}")
+            st.warning(f"⚠️ Could not process file `{rf.name}`: {e}")
 
     # -----------------------------------------------------------------------------
     # FINAL TABLE AND EXCEL EXPORT
