@@ -13,8 +13,35 @@ st.set_page_config(
 
 st.title("⚓ Naval Ephemeris & Automatic Route Mapper")
 st.write(
-    "Strict Sequence Matching: The route is applied ONLY if the origin and destination match the exact sequence and dates on the active calendar."
+    "Strict Sequence Matching & Smooth Sea Day Spatial Interpolation Across Active Route Days."
 )
+
+# -----------------------------------------------------------------------------
+# STANDARD PORT DATABASE & LOOKUP
+# -----------------------------------------------------------------------------
+PORT_DB = {
+    "LONG BEACH": {"lat": 33.7542, "lon": -118.1982, "tz": "7 W"},
+    "LOS ANGELES": {"lat": 33.7542, "lon": -118.1982, "tz": "7 W"},
+    "CABO SAN LUCAS": {"lat": 22.8808, "lon": -109.9125, "tz": "7 W"},
+    "MAZATLAN": {"lat": 23.2167, "lon": -106.4167, "tz": "7 W"},
+    "PUERTO VALLARTA": {"lat": 20.6236, "lon": -105.2325, "tz": "7 W"},
+    "ENSENADA": {"lat": 31.8667, "lon": -116.6333, "tz": "7 W"},
+    "SAN DIEGO": {"lat": 32.7157, "lon": -117.1611, "tz": "7 W"},
+    "CATALINA": {"lat": 33.3428, "lon": -118.3282, "tz": "7 W"},
+}
+
+
+def lookup_port_coords(port_text, db):
+    """Search for matching port in the database."""
+    if not port_text:
+        return None
+    pt_upper = str(port_text).upper().strip()
+
+    for key, data in db.items():
+        if key in pt_upper or pt_upper in key:
+            return data["lat"], data["lon"], data["tz"]
+    return None
+
 
 # -----------------------------------------------------------------------------
 # UTILITY FUNCTIONS
@@ -85,15 +112,19 @@ def parse_tz_offset(tz_val):
 
 def format_tz_string(tz_val, offset_hours):
     """Formats Time Zone string (e.g., '7 W' or '2 E')."""
-    s = str(tz_val).strip()
-    if not s or s.lower() in ["nan", "none"]:
-        return "0"
+    if tz_val and str(tz_val).strip().lower() not in [
+        "nan",
+        "none",
+        "",
+        "0.0",
+        "0",
+    ]:
+        s = str(tz_val).strip()
+        match_we = re.search(r"(\d+(?:\.\d+)?)\s*([WEwe])", s)
+        if match_we:
+            return f"{match_we.group(1)} {match_we.group(2).upper()}"
 
-    match_we = re.search(r"(\d+(?:\.\d+)?)\s*([WEwe])", s)
-    if match_we:
-        return f"{match_we.group(1)} {match_we.group(2).upper()}"
-
-    if offset_hours == 0:
+    if offset_hours == 0 or offset_hours is None:
         return "0"
 
     abs_h = abs(offset_hours)
@@ -136,8 +167,7 @@ def calculate_sun_events_native(lat, lon, date_obj, tz_offset_hours):
         def hours_to_time_str(h_decimal):
             h = int(h_decimal)
             m = int((h_decimal - h) * 60)
-            s = int((((h_decimal - h) * 60) - m) * 60)
-            return f"{h:02d}:{m:02d}:{s:02d}"
+            return f"{h:02d}:{m:02d}"
 
         return hours_to_time_str(sunrise_local_hours), hours_to_time_str(
             sunset_local_hours
@@ -153,13 +183,6 @@ def clean_text_val(val):
     if s.lower() in ["nan", "none", "null"]:
         return ""
     return s
-
-
-def interpolate_lat_lon(lat1, lon1, lat2, lon2, ratio):
-    """Interpolazione lineare tra due punti geografici."""
-    lat = lat1 + ratio * (lat2 - lat1)
-    lon = lon1 + ratio * (lon2 - lon1)
-    return lat, lon
 
 
 def export_styled_excel(df_out: pd.DataFrame) -> bytes:
@@ -244,8 +267,8 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
 
         port_val = str(row.get("PORT / WAYPOINT", ""))
         tz_val = str(row.get("TIME ZONE", ""))
-        sr_val = format_time_val(row.get("SUNRISE (Local Time)", ""))
-        ss_val = format_time_val(row.get("SUNSET (Local Time)", ""))
+        sr_val = format_time_val(row.get("SUNRISE", ""))
+        ss_val = format_time_val(row.get("SUNSET", ""))
 
         row_data = [date_str, port_val, tz_val, sr_val, ss_val]
 
@@ -426,6 +449,16 @@ if cal_file and route_files:
                 clean_text_val(end_wp[name_col]).upper() if name_col else ""
             )
 
+            # Aggiunge i waypoints del CSV al database dinamico dei porti
+            for _, r_row in df_r.iterrows():
+                wp_n = clean_text_val(r_row[name_col]).upper() if name_col else ""
+                if wp_n and wp_n not in PORT_DB:
+                    w_lat = parse_coordinate(r_row[lat_col])
+                    w_lon = parse_coordinate(r_row[lon_col])
+                    w_tz = str(r_row[tz_col]) if tz_col else "7 W"
+                    if w_lat != 0.0 or w_lon != 0.0:
+                        PORT_DB[wp_n] = {"lat": w_lat, "lon": w_lon, "tz": w_tz}
+
             st.write(
                 f"📄 **Route CSV:** `{rf.name}` | "
                 f"**Origin:** `{start_code or start_name_csv}` $\\rightarrow$ **Destination:** `{end_code or end_name_csv}` | "
@@ -502,10 +535,6 @@ if cal_file and route_files:
                     tz_offset = parse_tz_offset(tz_raw)
                     tz_str_formatted = format_tz_string(tz_raw, tz_offset)
 
-                    sunrise, sunset = calculate_sun_events_native(
-                        lat, lon, actual_date, tz_offset
-                    )
-
                     results_from_routes.append({
                         "CRUISE CODE": c_code,
                         "DATE": actual_date.strftime("%Y-%m-%d"),
@@ -514,8 +543,6 @@ if cal_file and route_files:
                         "LONGITUDE": lon,
                         "TIME ZONE": tz_str_formatted,
                         "TZ_OFFSET": tz_offset,
-                        "SUNRISE (Local Time)": sunrise,
-                        "SUNSET (Local Time)": sunset,
                         "DT_PARSED": mid_point["dt_parsed"],
                     })
 
@@ -523,7 +550,7 @@ if cal_file and route_files:
             st.warning(f"⚠️ Could not process file `{rf.name}`: {e}")
 
     # -----------------------------------------------------------------------------
-    # MASTER CALENDAR FILL & INTERPOLATION LOGIC
+    # MASTER SCHEDULE CONSTRUCTION & TWO-PASS INTERPOLATION
     # -----------------------------------------------------------------------------
     if not df_cal.empty:
         df_routes = (
@@ -532,8 +559,9 @@ if cal_file and route_files:
             else pd.DataFrame()
         )
 
-        final_rows = []
+        master_schedule = []
 
+        # PASSAGGIO 1: Mappatura iniziale con Porti Noti e file CSV
         for idx, cal_row in df_cal.iterrows():
             c_date = cal_row["Date_Parsed"]
             date_str = c_date.strftime("%Y-%m-%d")
@@ -544,131 +572,149 @@ if cal_file and route_files:
                 else "CRUISE"
             )
 
-            # Cerca se la data è presente nei waypoint gestiti dai CSV
+            lat, lon, tz_str, tz_offset = None, None, None, None
+
+            # 1a. Cerca nei dati ufficiali derivati dai file CSV caricati
             matched_res = None
             if not df_routes.empty and "DATE" in df_routes.columns:
                 match_df = df_routes[df_routes["DATE"] == date_str]
                 if not match_df.empty:
                     matched_res = match_df.iloc[0].to_dict()
 
-            if matched_res:
-                final_rows.append({
-                    "CRUISE CODE": cruise_id,
-                    "DATE": date_str,
-                    "PORT / WAYPOINT": port_name,
-                    "LATITUDE": matched_res["LATITUDE"],
-                    "LONGITUDE": matched_res["LONGITUDE"],
-                    "TIME ZONE": matched_res["TIME ZONE"],
-                    "SUNRISE (Local Time)": matched_res["SUNRISE (Local Time)"],
-                    "SUNSET (Local Time)": matched_res["SUNSET (Local Time)"],
-                })
+            if matched_res and matched_res.get("LATITUDE") is not None:
+                lat = matched_res["LATITUDE"]
+                lon = matched_res["LONGITUDE"]
+                tz_str = matched_res["TIME ZONE"]
+                tz_offset = matched_res["TZ_OFFSET"]
             else:
-                # LOGICA INTERPOLAZIONE SEA DAYS
-                # Cerca l'ultimo porto/WP noto PRIMA di questa data e il primo DOPO
-                prev_points = [
-                    r for r in final_rows if r.get("LATITUDE") is not None
-                ]
-                next_cal_rows = df_cal.iloc[idx + 1 :]
-
-                # Trova il punto successivo disponibile nel CSV
-                next_match = None
-                if not df_routes.empty:
-                    future_matches = df_routes[df_routes["DATE"] > date_str]
-                    if not future_matches.empty:
-                        next_match = future_matches.iloc[0].to_dict()
-
-                if prev_points and next_match:
-                    p1 = prev_points[-1]
-                    p2 = next_match
-
-                    p1_dt = datetime.strptime(p1["DATE"], "%Y-%m-%d")
-                    p2_dt = datetime.strptime(p2["DATE"], "%Y-%m-%d")
-
-                    total_days = (p2_dt - p1_dt).days
-
-                    if total_days > 1:
-                        # Se è un giorno tra la partenza e la mezzanotte del giorno dopo
-                        day_index = (c_date - p1_dt.date()).days
-
-                        # Calcolo ratio tra Partenza, Mezzanotte e Arrivo
-                        ratio = day_index / total_days
-                        lat, lon = interpolate_lat_lon(
-                            p1["LATITUDE"],
-                            p1["LONGITUDE"],
-                            p2["LATITUDE"],
-                            p2["LONGITUDE"],
-                            ratio,
-                        )
-
-                        tz_offset = p1.get(
-                            "TZ_OFFSET", parse_tz_offset(p1.get("TIME ZONE"))
-                        )
-                        tz_str = format_tz_string(
-                            p1.get("TIME ZONE"), tz_offset
-                        )
-
-                        sr, ss = calculate_sun_events_native(
-                            lat, lon, c_date, tz_offset
-                        )
-
-                        final_rows.append({
-                            "CRUISE CODE": cruise_id,
-                            "DATE": date_str,
-                            "PORT / WAYPOINT": (
-                                port_name if port_name else '"Fun Day" at Sea'
-                            ),
-                            "LATITUDE": lat,
-                            "LONGITUDE": lon,
-                            "TIME ZONE": tz_str,
-                            "SUNRISE (Local Time)": sr,
-                            "SUNSET (Local Time)": ss,
-                        })
-                    else:
-                        # Fallback ultimo punto noto
-                        lat, lon = p1["LATITUDE"], p1["LONGITUDE"]
-                        tz_str = p1["TIME ZONE"]
-                        tz_offset = parse_tz_offset(tz_str)
-                        sr, ss = calculate_sun_events_native(
-                            lat, lon, c_date, tz_offset
-                        )
-
-                        final_rows.append({
-                            "CRUISE CODE": cruise_id,
-                            "DATE": date_str,
-                            "PORT / WAYPOINT": (
-                                port_name if port_name else '"Fun Day" at Sea'
-                            ),
-                            "LATITUDE": lat,
-                            "LONGITUDE": lon,
-                            "TIME ZONE": tz_str,
-                            "SUNRISE (Local Time)": sr,
-                            "SUNSET (Local Time)": ss,
-                        })
-                elif prev_points:
-                    p1 = prev_points[-1]
-                    lat, lon = p1["LATITUDE"], p1["LONGITUDE"]
-                    tz_str = p1["TIME ZONE"]
+                # 1b. Cerca nel database dei porti tramite corrispondenza testuale
+                coords = lookup_port_coords(port_name, PORT_DB)
+                if coords:
+                    lat, lon, tz_str = coords
                     tz_offset = parse_tz_offset(tz_str)
-                    sr, ss = calculate_sun_events_native(
-                        lat, lon, c_date, tz_offset
-                    )
 
-                    final_rows.append({
-                        "CRUISE CODE": cruise_id,
-                        "DATE": date_str,
-                        "PORT / WAYPOINT": (
-                            port_name if port_name else '"Fun Day" at Sea'
-                        ),
-                        "LATITUDE": lat,
-                        "LONGITUDE": lon,
-                        "TIME ZONE": tz_str,
-                        "SUNRISE (Local Time)": sr,
-                        "SUNSET (Local Time)": ss,
-                    })
+            master_schedule.append({
+                "CRUISE CODE": cruise_id,
+                "DATE_OBJ": c_date,
+                "DATE": date_str,
+                "PORT / WAYPOINT": port_name,
+                "LATITUDE": lat,
+                "LONGITUDE": lon,
+                "TIME ZONE": tz_str,
+                "TZ_OFFSET": tz_offset,
+            })
+
+        # PASSAGGIO 2: Interpolazione Lineare degli Intervalli (Sea Days)
+        n_items = len(master_schedule)
+        known_indices = [
+            i
+            for i, item in enumerate(master_schedule)
+            if item["LATITUDE"] is not None
+        ]
+
+        if known_indices:
+            # Piattaforma i valori iniziali se il primo giorno non è noto
+            first_k = known_indices[0]
+            for i in range(0, first_k):
+                master_schedule[i]["LATITUDE"] = master_schedule[first_k][
+                    "LATITUDE"
+                ]
+                master_schedule[i]["LONGITUDE"] = master_schedule[first_k][
+                    "LONGITUDE"
+                ]
+                master_schedule[i]["TIME ZONE"] = master_schedule[first_k][
+                    "TIME ZONE"
+                ]
+                master_schedule[i]["TZ_OFFSET"] = master_schedule[first_k][
+                    "TZ_OFFSET"
+                ]
+
+            # Piattaforma i valori finali se gli ultimi giorni non sono noti
+            last_k = known_indices[-1]
+            for i in range(last_k + 1, n_items):
+                master_schedule[i]["LATITUDE"] = master_schedule[last_k][
+                    "LATITUDE"
+                ]
+                master_schedule[i]["LONGITUDE"] = master_schedule[last_k][
+                    "LONGITUDE"
+                ]
+                master_schedule[i]["TIME ZONE"] = master_schedule[last_k][
+                    "TIME ZONE"
+                ]
+                master_schedule[i]["TZ_OFFSET"] = master_schedule[last_k][
+                    "TZ_OFFSET"
+                ]
+
+            # Interpolazione progressiva tra ogni coppia di porti noti adiacenti
+            for k in range(len(known_indices) - 1):
+                idx1 = known_indices[k]
+                idx2 = known_indices[k + 1]
+
+                if idx2 - idx1 > 1:  # Presenza di uno o più Sea Days intermedi
+                    p1 = master_schedule[idx1]
+                    p2 = master_schedule[idx2]
+
+                    total_steps = idx2 - idx1
+                    for step in range(1, total_steps):
+                        curr_idx = idx1 + step
+                        ratio = step / total_steps
+
+                        lat_interp = p1["LATITUDE"] + ratio * (
+                            p2["LATITUDE"] - p1["LATITUDE"]
+                        )
+                        lon_interp = p1["LONGITUDE"] + ratio * (
+                            p2["LONGITUDE"] - p1["LONGITUDE"]
+                        )
+
+                        tz_off1 = (
+                            p1["TZ_OFFSET"]
+                            if p1["TZ_OFFSET"] is not None
+                            else 0.0
+                        )
+                        tz_off2 = (
+                            p2["TZ_OFFSET"]
+                            if p2["TZ_OFFSET"] is not None
+                            else 0.0
+                        )
+                        tz_off_interp = tz_off1 + ratio * (tz_off2 - tz_off1)
+
+                        master_schedule[curr_idx]["LATITUDE"] = lat_interp
+                        master_schedule[curr_idx]["LONGITUDE"] = lon_interp
+                        master_schedule[curr_idx]["TZ_OFFSET"] = tz_off_interp
+                        master_schedule[curr_idx]["TIME ZONE"] = (
+                            format_tz_string(p1["TIME ZONE"], tz_off_interp)
+                        )
+
+        # PASSAGGIO 3: Calcolo delle effemeridi (Alba e Tramonto)
+        final_rows = []
+        for item in master_schedule:
+            lat = item["LATITUDE"]
+            lon = item["LONGITUDE"]
+            tz_off = (
+                item["TZ_OFFSET"] if item["TZ_OFFSET"] is not None else 0.0
+            )
+
+            if lat is not None and lon is not None:
+                sr, ss = calculate_sun_events_native(
+                    lat, lon, item["DATE_OBJ"], tz_off
+                )
+            else:
+                sr, ss = "N/A", "N/A"
+
+            final_rows.append({
+                "CRUISE CODE": item["CRUISE CODE"],
+                "DATE": item["DATE"],
+                "PORT / WAYPOINT": item["PORT / WAYPOINT"],
+                "TIME ZONE": item["TIME ZONE"],
+                "SUNRISE": sr,
+                "SUNSET": ss,
+                "LATITUDE": lat,
+                "LONGITUDE": lon,
+            })
 
         df_out = pd.DataFrame(final_rows)
 
-        # Deduplicazione per singola Data Solare (rimuove il doppio Long Beach sui turnaround days)
+        # Deduplicazione per singola Data Solare
         df_out = df_out.drop_duplicates(subset=["DATE"], keep="first")
         df_out = df_out.sort_values(by="DATE").reset_index(drop=True)
 
