@@ -16,7 +16,6 @@ st.write(
     "Strict Sequence Matching: The route is applied ONLY if the origin and destination match the exact sequence and dates on the active calendar."
 )
 
-
 # -----------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 # -----------------------------------------------------------------------------
@@ -158,17 +157,14 @@ def clean_text_val(val):
 
 def export_styled_excel(df_out: pd.DataFrame) -> bytes:
     """Generates styled Excel file with strict row-by-row mapping."""
-    # Reset sicuro dell'indice ed eliminazione righe totalmente vuote
     df_clean = df_out.dropna(how="all").reset_index(drop=True)
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Schedule"
 
-    # Attiva linee griglia
     ws.views.sheetView[0].showGridLines = True
 
-    # STILI GRAFICI
     font_header = Font(name="Calibri", size=11, bold=True, color="1F4E79")
     font_date = Font(name="Calibri", size=11, bold=True, color="1F4E79")
     font_body = Font(name="Calibri", size=11, bold=True, color="000000")
@@ -203,7 +199,6 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
         bottom=medium_black,
     )
 
-    # Scrittura Intestazione
     headers = ["DATE", "PORT OF CALL", "TIME\nZONE", "SUNRISE", "SUNSET"]
     ws.row_dimensions[1].height = 28
 
@@ -214,7 +209,6 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
         cell.alignment = align_center
         cell.border = border_header
 
-    # Helper formattazione orario (HH:MM)
     def format_time_val(t_val):
         t_str = str(t_val).strip()
         parts = t_str.split(":")
@@ -224,9 +218,8 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
             return f"{h}:{m}"
         return t_str
 
-    # Scrittura dati riga per riga (Sequenziale garantita)
     for idx, row in df_clean.iterrows():
-        current_row = idx + 2  # Riga 2, 3, 4... perfettamente contigue
+        current_row = idx + 2
 
         raw_date = row.get("DATE", "")
         if isinstance(raw_date, str) and raw_date:
@@ -249,7 +242,6 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
 
         row_data = [date_str, port_val, tz_val, sr_val, ss_val]
 
-        # Selezione colore sfondo
         port_lower = port_val.lower()
         if "sea" in port_lower or "fun day" in port_lower:
             row_fill = fill_sea_day
@@ -260,7 +252,6 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
 
         ws.row_dimensions[current_row].height = 20
 
-        # Scrittura e formattazione simultanea
         for col_idx, val in enumerate(row_data, start=1):
             cell = ws.cell(row=current_row, column=col_idx, value=val)
             cell.alignment = align_center
@@ -268,7 +259,6 @@ def export_styled_excel(df_out: pd.DataFrame) -> bytes:
             cell.fill = row_fill
             cell.font = font_date if col_idx == 1 else font_body
 
-    # Larghezza colonne
     col_widths = {"A": 16, "B": 32, "C": 12, "D": 12, "E": 12}
     for col_letter, width in col_widths.items():
         ws.column_dimensions[col_letter].width = width
@@ -293,7 +283,6 @@ route_files = st.sidebar.file_uploader(
 if cal_file and route_files:
     df_cal = pd.read_excel(cal_file)
 
-    # Identify Calendar columns
     cal_date_col = next(
         (
             c
@@ -337,7 +326,6 @@ if cal_file and route_files:
         else ""
     )
 
-    # Sort calendar by date
     df_cal = df_cal.sort_values(by="Date_Parsed").reset_index(drop=True)
 
     st.subheader("🔍 Sequential Route Analysis")
@@ -408,12 +396,10 @@ if cal_file and route_files:
                 lambda d: (d - min_date).days if pd.notnull(d) else 0
             )
 
-            # Route duration in days
             route_duration_days = int(
                 df_r["rel_day"].max() - df_r["rel_day"].min()
             )
 
-            # EXTRACT ORIGIN & DESTINATION CODES/NAMES
             filename_port_codes = re.findall(r"\b[A-Z]{3}\b", rf.name.upper())
 
             start_code = (
@@ -439,14 +425,12 @@ if cal_file and route_files:
                 f"**Route Duration:** {route_duration_days + 1} days"
             )
 
-            # SEQUENTIAL CALENDAR SEARCH
             matched_sequence_dates = []
 
             for i in range(len(df_cal)):
                 row_start = df_cal.iloc[i]
                 date_start = row_start["Date_Parsed"]
 
-                # Check if calendar row matches departure port
                 start_match = (
                     (start_code and start_code == row_start["Port_Code_Clean"])
                     or (
@@ -463,7 +447,6 @@ if cal_file and route_files:
                         days=route_duration_days
                     )
 
-                    # Search calendar for matching arrival date and destination port
                     matching_end_rows = df_cal[
                         df_cal["Date_Parsed"] == target_end_date
                     ]
@@ -504,16 +487,36 @@ if cal_file and route_files:
                     f"ℹ️ Route `{rf.name}` is not scheduled in the uploaded calendar month. Skipping gracefully without errors."
                 )
 
-            # GENERATE EPHEMERIS ONLY FOR VALIDATED SEQUENCES
+            # GENERATE EPHEMERIS CONTINUOUSLY (GIORNI SEQUENZIALI SENZA SALTI)
             for c_code, start_date in matched_sequence_dates:
-                for rel_day, day_group in df_r.groupby("rel_day"):
-                    actual_date = start_date + timedelta(days=int(rel_day))
-                    mid_point = day_group.iloc[len(day_group) // 2]
+                last_known_lat = parse_coordinate(df_r.iloc[0][lat_col])
+                last_known_lon = parse_coordinate(df_r.iloc[0][lon_col])
+                last_known_tz = df_r.iloc[0][tz_col] if tz_col else "0"
 
-                    lat = parse_coordinate(mid_point[lat_col])
-                    lon = parse_coordinate(mid_point[lon_col])
+                for rel_day in range(route_duration_days + 1):
+                    actual_date = start_date + timedelta(days=rel_day)
+                    day_group = df_r[df_r["rel_day"] == rel_day]
 
-                    # RETRIEVE PORT/DAY NAME FROM ORIGINAL CALENDAR
+                    if not day_group.empty:
+                        mid_point = day_group.iloc[len(day_group) // 2]
+                        lat = parse_coordinate(mid_point[lat_col])
+                        lon = parse_coordinate(mid_point[lon_col])
+                        tz_raw = mid_point[tz_col] if tz_col else last_known_tz
+
+                        last_known_lat, last_known_lon, last_known_tz = (
+                            lat,
+                            lon,
+                            tz_raw,
+                        )
+                    else:
+                        # Se nel CSV mancano WP per quel giorno, usa le ultime coordinate note
+                        lat, lon, tz_raw = (
+                            last_known_lat,
+                            last_known_lon,
+                            last_known_tz,
+                        )
+
+                    # Recupera il nome dal calendario
                     cal_row_match = df_cal[
                         df_cal["Date_Parsed"] == actual_date
                     ]
@@ -521,17 +524,18 @@ if cal_file and route_files:
                         port_day_name = clean_text_val(
                             cal_row_match.iloc[0][cal_port_col]
                         )
-                    else:
+                    elif not day_group.empty:
                         port_day_name = (
                             clean_text_val(mid_point[name_col])
                             if name_col
-                            else ""
+                            else f"Day {rel_day + 1}"
                         )
+                    else:
+                        port_day_name = '"Fun Day" at Sea'
 
                     if not port_day_name:
                         port_day_name = f"Day {rel_day + 1}"
 
-                    tz_raw = mid_point[tz_col] if tz_col else "0"
                     tz_offset = parse_tz_offset(tz_raw)
                     tz_str_formatted = format_tz_string(tz_raw, tz_offset)
 
@@ -560,10 +564,10 @@ if cal_file and route_files:
     # -----------------------------------------------------------------------------
     if results:
         df_out = pd.DataFrame(results)
+        # Rimuove duplicati basandosi su Data e Crociera per evitare doppi porti finali
         df_out = df_out.drop_duplicates(
-            subset=["CRUISE CODE", "DATE", "PORT / WAYPOINT"]
+            subset=["CRUISE CODE", "DATE"], keep="first"
         )
-        # RESET INDEX NECESSARIO PER EVITARE SALTI NELL'EXCEL
         df_out = df_out.sort_values(by=["DATE", "CRUISE CODE"]).reset_index(
             drop=True
         )
@@ -572,7 +576,6 @@ if cal_file and route_files:
         st.subheader("📊 Automatic Ephemeris Calculation Results")
         st.dataframe(df_out, use_container_width=True)
 
-        # Generate styled Excel file
         excel_data = export_styled_excel(df_out)
 
         st.download_button(
